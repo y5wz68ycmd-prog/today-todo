@@ -1,0 +1,418 @@
+const { spawn } = require("child_process");
+const os = require("os");
+const path = require("path");
+const { pathToFileURL } = require("url");
+
+const edgePath =
+  process.env.EDGE_PATH ||
+  "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe";
+const port = 9231;
+const profilePath = path.join(os.tmpdir(), `todo-list-edge-${Date.now()}`);
+const appUrl = pathToFileURL(path.resolve(__dirname, "../index.html")).href;
+
+const delay = (milliseconds) =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+async function getPageTarget() {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json`);
+      const targets = await response.json();
+      const target = targets.find(
+        (item) => item.type === "page" && item.url.includes("index.html"),
+      );
+
+      if (target) {
+        return target;
+      }
+    } catch {
+      // Edge needs a brief moment to expose its debugging endpoint.
+    }
+
+    await delay(200);
+  }
+
+  throw new Error("テスト用ブラウザを開けませんでした");
+}
+
+function createCdpClient(webSocketUrl) {
+  const socket = new WebSocket(webSocketUrl);
+  const pending = new Map();
+  let nextId = 1;
+
+  socket.addEventListener("message", (event) => {
+    const message = JSON.parse(event.data);
+    const request = pending.get(message.id);
+
+    if (!request) {
+      return;
+    }
+
+    pending.delete(message.id);
+
+    if (message.error) {
+      request.reject(new Error(message.error.message));
+    } else {
+      request.resolve(message.result);
+    }
+  });
+
+  const ready = new Promise((resolve, reject) => {
+    socket.addEventListener("open", resolve, { once: true });
+    socket.addEventListener("error", reject, { once: true });
+  });
+
+  return {
+    ready,
+    send(method, params = {}) {
+      const id = nextId;
+      nextId += 1;
+
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        socket.send(JSON.stringify({ id, method, params }));
+      });
+    },
+    close() {
+      socket.close();
+    },
+  };
+}
+
+async function evaluate(client, expression) {
+  const response = await client.send("Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+
+  if (response.exceptionDetails) {
+    const description =
+      response.exceptionDetails.exception?.description ||
+      response.exceptionDetails.text;
+    throw new Error(description);
+  }
+
+  return response.result.value;
+}
+
+(async () => {
+  const edge = spawn(
+    edgePath,
+    [
+      "--headless=new",
+      "--disable-gpu",
+      "--no-sandbox",
+      "--remote-allow-origins=*",
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${profilePath}`,
+      appUrl,
+    ],
+    { stdio: "ignore" },
+  );
+
+  let client;
+
+  try {
+    const target = await getPageTarget();
+    client = createCdpClient(target.webSocketDebuggerUrl);
+    await client.ready;
+    await client.send("Runtime.enable");
+
+    await evaluate(client, "localStorage.clear(); location.reload()");
+    await delay(500);
+
+    await evaluate(client, `document.querySelector("#todo-form").requestSubmit()`);
+    assert(
+      (await evaluate(client, `document.querySelector("#form-message").textContent`))
+        .includes("入力してください"),
+      "空入力のエラーが表示されませんでした",
+    );
+
+    await evaluate(
+      client,
+      `document.querySelector("#todo-input").value = "請求書を送る";
+       document.querySelector("#due-date").value = "2020-01-01";
+       document.querySelector("#priority").value = "high";
+       document.querySelector("#category").value = "仕事";
+       document.querySelector("#todo-form").requestSubmit();`,
+    );
+
+    assert(
+      (await evaluate(client, `document.querySelectorAll(".todo-item").length`)) ===
+        1,
+      "タスクを追加できませんでした",
+    );
+    assert(
+      await evaluate(client, `document.querySelector(".todo-item").classList.contains("overdue")`),
+      "期限切れが強調されませんでした",
+    );
+    assert(
+      (await evaluate(client, `document.querySelector(".category-badge").textContent`)) ===
+        "仕事",
+      "カテゴリーが表示されませんでした",
+    );
+    assert(
+      (await evaluate(client, `document.querySelector(".todo-item").dataset.priority`)) ===
+        "high",
+      "優先度が保存されませんでした",
+    );
+
+    await evaluate(
+      client,
+      `document.querySelector("#todo-input").value = "請求書を送る";
+       document.querySelector("#todo-form").requestSubmit();`,
+    );
+    assert(
+      (await evaluate(client, `document.querySelector("#form-message").textContent`))
+        .includes("すでにあります"),
+      "重複タスクが検出されませんでした",
+    );
+
+    await evaluate(
+      client,
+      `document.querySelector("#todo-input").value = "牛乳を買う";
+       document.querySelector("#priority").value = "low";
+       document.querySelector("#category").value = "買い物";
+       document.querySelector("#todo-form").requestSubmit();`,
+    );
+
+    await evaluate(
+      client,
+      `document.querySelector("#search-input").value = "仕事";
+       document.querySelector("#search-input").dispatchEvent(
+         new Event("input", { bubbles: true })
+       );`,
+    );
+    assert(
+      (await evaluate(client, `document.querySelectorAll(".todo-item").length`)) ===
+        1,
+      "カテゴリー検索が正しく動きませんでした",
+    );
+
+    await evaluate(
+      client,
+      `document.querySelector("#search-input").value = "";
+       document.querySelector("#search-input").dispatchEvent(
+         new Event("input", { bubbles: true })
+       );
+       document.querySelector("#sort-select").value = "priority";
+       document.querySelector("#sort-select").dispatchEvent(
+         new Event("change", { bubbles: true })
+       );`,
+    );
+    assert(
+      (await evaluate(
+        client,
+        `document.querySelector(".todo-item .todo-text").textContent`,
+      )) === "請求書を送る",
+      "優先度順に並べ替えられませんでした",
+    );
+
+    await evaluate(
+      client,
+      `Array.from(document.querySelectorAll(".todo-item"))
+         .find((item) => item.textContent.includes("牛乳を買う"))
+         .querySelector(".edit-button").click();`,
+    );
+    assert(
+      await evaluate(client, `document.querySelector("#edit-dialog").open`),
+      "編集画面が開きませんでした",
+    );
+
+    await evaluate(
+      client,
+      `document.querySelector("#edit-text").value = "牛乳とパンを買う";
+       document.querySelector("#edit-priority").value = "medium";
+       document.querySelector("#edit-form").requestSubmit();`,
+    );
+    assert(
+      await evaluate(
+        client,
+        `Array.from(document.querySelectorAll(".todo-text"))
+          .some((item) => item.textContent === "牛乳とパンを買う")`,
+      ),
+      "タスクを編集できませんでした",
+    );
+
+    await evaluate(
+      client,
+      `Array.from(document.querySelectorAll(".todo-item"))
+         .find((item) => item.textContent.includes("牛乳とパンを買う"))
+         .querySelector(".todo-checkbox").click();`,
+    );
+    assert(
+      (await evaluate(
+        client,
+        `JSON.parse(localStorage.getItem("simple-todo-list-history")).length`,
+      )) === 1,
+      "完了履歴が保存されませんでした",
+    );
+
+    await evaluate(client, `document.querySelector("#history-button").click()`);
+    assert(
+      (await evaluate(client, `document.querySelectorAll(".history-item").length`)) ===
+        1,
+      "完了履歴が表示されませんでした",
+    );
+    await evaluate(client, `document.querySelector("#history-done").click()`);
+
+    await evaluate(client, `document.querySelector("#theme-toggle").click()`);
+    assert(
+      (await evaluate(client, `document.documentElement.dataset.theme`)) ===
+        "dark",
+      "ダークモードへ切り替えられませんでした",
+    );
+
+    await evaluate(
+      client,
+      `Array.from(document.querySelectorAll(".todo-item"))
+         .find((item) => item.textContent.includes("請求書を送る"))
+         .querySelector(".delete-button").click();`,
+    );
+    assert(
+      (await evaluate(client, `document.querySelectorAll(".todo-item").length`)) ===
+        1,
+      "タスクを削除できませんでした",
+    );
+    await evaluate(client, `document.querySelector("#toast-action").click()`);
+    assert(
+      (await evaluate(client, `document.querySelectorAll(".todo-item").length`)) ===
+        2,
+      "削除したタスクを元に戻せませんでした",
+    );
+
+    await evaluate(client, "location.reload()");
+    await delay(500);
+    assert(
+      (await evaluate(client, `document.querySelectorAll(".todo-item").length`)) ===
+        2,
+      "再読み込み後にタスクが保存されていませんでした",
+    );
+    assert(
+      (await evaluate(client, `document.documentElement.dataset.theme`)) ===
+        "dark",
+      "テーマ設定が保存されていませんでした",
+    );
+
+    const accessibilityIssues = await evaluate(
+      client,
+      `(() => {
+        const ids = Array.from(document.querySelectorAll("[id]")).map((node) => node.id);
+        const duplicateIds = ids.filter((id, index) => ids.indexOf(id) !== index);
+        const unnamedButtons = Array.from(document.querySelectorAll("button"))
+          .filter((button) => !button.textContent.trim() && !button.getAttribute("aria-label"))
+          .length;
+        return { duplicateIds, unnamedButtons };
+      })()`,
+    );
+    assert(
+      accessibilityIssues.duplicateIds.length === 0,
+      "重複したIDがあります",
+    );
+    assert(
+      accessibilityIssues.unnamedButtons === 0,
+      "名前のないボタンがあります",
+    );
+
+    await client.send("Emulation.setDeviceMetricsOverride", {
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 1,
+      mobile: true,
+    });
+    await delay(250);
+
+    const mobileLayout = await evaluate(
+      client,
+      `(() => {
+        const themeRect = document.querySelector("#theme-toggle").getBoundingClientRect();
+        const addRect = document.querySelector("#todo-form button[type='submit']")
+          .getBoundingClientRect();
+        return {
+          innerWidth: window.innerWidth,
+          scrollWidth: document.documentElement.scrollWidth,
+          themeRight: themeRect.right,
+          addRight: addRect.right,
+        };
+      })()`,
+    );
+    assert(
+      mobileLayout.scrollWidth <= mobileLayout.innerWidth,
+      "スマホ表示で横スクロールが発生しています",
+    );
+    assert(
+      mobileLayout.themeRight <= mobileLayout.innerWidth &&
+        mobileLayout.addRight <= mobileLayout.innerWidth,
+      "スマホ表示で主要ボタンが画面外にはみ出しています",
+    );
+
+    await evaluate(client, `document.querySelector("#export-button").click()`);
+    assert(
+      (await evaluate(client, `document.querySelector("#toast-message").textContent`))
+        .includes("書き出しました"),
+      "バックアップを書き出せませんでした",
+    );
+
+    await evaluate(
+      client,
+      `window.confirm = () => true;
+       (() => {
+         const backup = {
+           version: 2,
+           todos: [{
+             id: "imported-task",
+             text: "読み込んだタスク",
+             dueDate: "",
+             priority: "medium",
+             category: "個人",
+             completed: false,
+             createdAt: Date.now(),
+             updatedAt: Date.now(),
+             completedAt: null
+           }],
+           history: [],
+           settings: { theme: "light", sort: "oldest" }
+         };
+         const file = new File(
+           [JSON.stringify(backup)],
+           "todo-backup.json",
+           { type: "application/json" }
+         );
+         const transfer = new DataTransfer();
+         transfer.items.add(file);
+         const input = document.querySelector("#import-input");
+         input.files = transfer.files;
+         input.dispatchEvent(new Event("change", { bubbles: true }));
+       })();`,
+    );
+    await delay(250);
+    assert(
+      (await evaluate(client, `document.querySelector(".todo-text").textContent`)) ===
+        "読み込んだタスク",
+      "バックアップを読み込めませんでした",
+    );
+    assert(
+      (await evaluate(client, `document.documentElement.dataset.theme`)) ===
+        "light",
+      "バックアップの設定を復元できませんでした",
+    );
+
+    console.log(
+      "PASS: validation, add, due date, priority, category, search, sort, edit, history, theme, undo, persistence, accessibility, mobile layout, backup",
+    );
+    await client.send("Browser.close");
+  } finally {
+    client?.close();
+    edge.kill();
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

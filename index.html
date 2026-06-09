@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta
+    name="description"
+    content="期限、優先度、カテゴリー、検索、履歴、バックアップに対応したToDoリスト"
+  >
+  <meta name="theme-color" content="#edf0e8">
+  <title>今日のToDo</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip-link" href="#todo-list">タスク一覧へ移動</a>
+
+  <main class="app">
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">MY TASKS</p>
+        <h1>今日のToDo</h1>
+        <p class="date" id="today"></p>
+      </div>
+      <button
+        class="icon-button theme-button"
+        id="theme-toggle"
+        type="button"
+        aria-label="ダークモードに切り替える"
+        title="テーマを切り替える"
+      >
+        <span aria-hidden="true" id="theme-icon">☾</span>
+      </button>
+    </header>
+
+    <section class="composer-card" aria-labelledby="add-task-title">
+      <h2 class="sr-only" id="add-task-title">新しいタスクを追加</h2>
+      <form class="add-form" id="todo-form" novalidate>
+        <div class="task-input-row">
+          <label class="sr-only" for="todo-input">やること</label>
+          <input
+            id="todo-input"
+            type="text"
+            maxlength="100"
+            placeholder="やることを入力..."
+            autocomplete="off"
+            aria-describedby="form-message"
+            required
+          >
+          <button class="primary-button" type="submit">追加</button>
+        </div>
+
+        <div class="task-options">
+          <label class="option-field">
+            <span>期限</span>
+            <input id="due-date" type="date">
+          </label>
+
+          <label class="option-field">
+            <span>優先度</span>
+            <select id="priority">
+              <option value="medium">中</option>
+              <option value="high">高</option>
+              <option value="low">低</option>
+            </select>
+          </label>
+
+          <label class="option-field category-field">
+            <span>カテゴリー</span>
+            <input
+              id="category"
+              type="text"
+              maxlength="30"
+              list="category-suggestions"
+              placeholder="未分類"
+              autocomplete="off"
+            >
+          </label>
+        </div>
+
+        <p class="form-message" id="form-message" role="alert"></p>
+      </form>
+    </section>
+
+    <section class="workspace" aria-label="タスク管理">
+      <div class="toolbar">
+        <label class="search-field">
+          <span class="sr-only">タスクを検索</span>
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input
+            id="search-input"
+            type="search"
+            placeholder="タスクやカテゴリーを検索"
+            autocomplete="off"
+          >
+        </label>
+
+        <label class="sort-field">
+          <span>並べ替え</span>
+          <select id="sort-select">
+            <option value="newest">新しい順</option>
+            <option value="oldest">古い順</option>
+            <option value="due">期限が近い順</option>
+            <option value="priority">優先度順</option>
+            <option value="category">カテゴリー順</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="summary">
+        <p id="task-count" aria-live="polite">タスクはありません</p>
+        <div class="summary-actions">
+          <button class="text-button" id="history-button" type="button">
+            完了履歴
+          </button>
+          <button class="text-button" id="clear-completed" type="button">
+            完了済みを削除
+          </button>
+        </div>
+      </div>
+
+      <ul class="todo-list" id="todo-list" aria-label="タスク一覧"></ul>
+
+      <div class="empty-state" id="empty-state">
+        <div class="empty-icon" aria-hidden="true">✓</div>
+        <p>まだタスクはありません</p>
+        <span>上の入力欄から追加してみましょう</span>
+      </div>
+
+      <div class="panel-footer">
+        <nav class="filters" aria-label="表示するタスク">
+          <button
+            class="filter active"
+            type="button"
+            data-filter="all"
+            aria-pressed="true"
+          >
+            すべて
+          </button>
+          <button
+            class="filter"
+            type="button"
+            data-filter="active"
+            aria-pressed="false"
+          >
+            未完了
+          </button>
+          <button
+            class="filter"
+            type="button"
+            data-filter="completed"
+            aria-pressed="false"
+          >
+            完了
+          </button>
+          <button
+            class="filter"
+            type="button"
+            data-filter="overdue"
+            aria-pressed="false"
+          >
+            期限切れ
+          </button>
+        </nav>
+
+        <div class="backup-actions">
+          <button class="text-button" id="export-button" type="button">
+            書き出す
+          </button>
+          <button class="text-button" id="import-button" type="button">
+            読み込む
+          </button>
+          <input
+            class="sr-only"
+            id="import-input"
+            type="file"
+            accept="application/json,.json"
+          >
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <datalist id="category-suggestions">
+    <option value="仕事"></option>
+    <option value="個人"></option>
+    <option value="買い物"></option>
+    <option value="勉強"></option>
+    <option value="健康"></option>
+  </datalist>
+
+  <template id="todo-template">
+    <li class="todo-item">
+      <label class="todo-check-control">
+        <input class="todo-checkbox" type="checkbox">
+        <span class="custom-checkbox" aria-hidden="true"></span>
+      </label>
+
+      <div class="todo-main">
+        <div class="todo-heading">
+          <span class="priority-dot" aria-hidden="true"></span>
+          <span class="todo-text"></span>
+        </div>
+        <div class="todo-meta">
+          <span class="category-badge"></span>
+          <time class="todo-due-date"></time>
+        </div>
+      </div>
+
+      <div class="todo-actions">
+        <button class="action-button edit-button" type="button">編集</button>
+        <button
+          class="action-button delete-button"
+          type="button"
+          aria-label="タスクを削除"
+          title="削除"
+        >
+          ×
+        </button>
+      </div>
+    </li>
+  </template>
+
+  <dialog class="app-dialog" id="edit-dialog" aria-labelledby="edit-title">
+    <form class="dialog-form" id="edit-form" method="dialog" novalidate>
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">EDIT TASK</p>
+          <h2 id="edit-title">タスクを編集</h2>
+        </div>
+        <button
+          class="icon-button"
+          id="edit-close"
+          type="button"
+          aria-label="編集画面を閉じる"
+        >
+          ×
+        </button>
+      </div>
+
+      <label class="dialog-field">
+        <span>やること</span>
+        <input id="edit-text" type="text" maxlength="100" required>
+      </label>
+
+      <div class="dialog-grid">
+        <label class="dialog-field">
+          <span>期限</span>
+          <input id="edit-due-date" type="date">
+        </label>
+
+        <label class="dialog-field">
+          <span>優先度</span>
+          <select id="edit-priority">
+            <option value="high">高</option>
+            <option value="medium">中</option>
+            <option value="low">低</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="dialog-field">
+        <span>カテゴリー</span>
+        <input
+          id="edit-category"
+          type="text"
+          maxlength="30"
+          list="category-suggestions"
+          placeholder="未分類"
+        >
+      </label>
+
+      <p class="form-message" id="edit-message" role="alert"></p>
+
+      <div class="dialog-actions">
+        <button class="secondary-button" id="edit-cancel" type="button">
+          キャンセル
+        </button>
+        <button class="primary-button" type="submit">変更を保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="app-dialog history-dialog" id="history-dialog" aria-labelledby="history-title">
+    <section>
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">HISTORY</p>
+          <h2 id="history-title">完了履歴</h2>
+        </div>
+        <button
+          class="icon-button"
+          id="history-close"
+          type="button"
+          aria-label="完了履歴を閉じる"
+        >
+          ×
+        </button>
+      </div>
+
+      <ol class="history-list" id="history-list"></ol>
+      <div class="history-empty" id="history-empty">
+        完了したタスクはまだありません。
+      </div>
+
+      <div class="dialog-actions">
+        <button class="text-button danger-text" id="clear-history" type="button">
+          履歴を消去
+        </button>
+        <button class="primary-button" id="history-done" type="button">
+          閉じる
+        </button>
+      </div>
+    </section>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite">
+    <span id="toast-message"></span>
+    <button id="toast-action" type="button" hidden>元に戻す</button>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
