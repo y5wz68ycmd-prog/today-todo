@@ -230,6 +230,8 @@ async function evaluate(client, expression) {
       client,
       `document.querySelector("#edit-text").value = "牛乳とパンを買う";
        document.querySelector("#edit-priority").value = "medium";
+       document.querySelector("#edit-due-date").value = "2099-01-01";
+       document.querySelector("#edit-repeat").value = "weekly";
        document.querySelector("#edit-form").requestSubmit();`,
     );
     assert(
@@ -239,6 +241,23 @@ async function evaluate(client, expression) {
           .some((item) => item.textContent === "牛乳とパンを買う")`,
       ),
       "タスクを編集できませんでした",
+    );
+    assert(
+      (await evaluate(
+        client,
+        `JSON.parse(localStorage.getItem("simple-todo-list"))
+          .find((todo) => todo.text === "牛乳とパンを買う").repeat`,
+      )) === "weekly",
+      "繰り返し設定を保存できませんでした",
+    );
+    assert(
+      (await evaluate(
+        client,
+        `Array.from(document.querySelectorAll(".todo-item"))
+          .find((item) => item.textContent.includes("牛乳とパンを買う"))
+          .querySelector(".repeat-badge").textContent`,
+      )).includes("毎週"),
+      "繰り返し設定が表示されませんでした",
     );
 
     await evaluate(
@@ -253,6 +272,29 @@ async function evaluate(client, expression) {
         `JSON.parse(localStorage.getItem("simple-todo-list-history")).length`,
       )) === 1,
       "完了履歴が保存されませんでした",
+    );
+    assert(
+      (await evaluate(
+        client,
+        `JSON.parse(localStorage.getItem("simple-todo-list"))
+          .find((todo) => todo.text === "牛乳とパンを買う").dueDate`,
+      )) === "2099-01-08",
+      "毎週タスクの次回期限を作成できませんでした",
+    );
+    assert(
+      !(await evaluate(
+        client,
+        `JSON.parse(localStorage.getItem("simple-todo-list"))
+          .find((todo) => todo.text === "牛乳とパンを買う").completed`,
+      )),
+      "繰り返しタスクが次回分の未完了状態に戻りませんでした",
+    );
+    assert(
+      (await evaluate(
+        client,
+        `getNextDueDate({ dueDate: "2099-01-31", repeat: "monthly" })`,
+      )) === "2099-02-28",
+      "月末の毎月タスクを正しく計算できませんでした",
     );
 
     await evaluate(client, `document.querySelector("#history-button").click()`);
@@ -403,9 +445,16 @@ async function evaluate(client, expression) {
         "light",
       "バックアップの設定を復元できませんでした",
     );
+    assert(
+      (await evaluate(
+        client,
+        `JSON.parse(localStorage.getItem("simple-todo-list"))[0].repeat`,
+      )) === "none",
+      "旧バックアップの繰り返し設定を移行できませんでした",
+    );
 
     console.log(
-      "PASS: validation, add, due date, priority, category, search, sort, edit, history, theme, undo, persistence, accessibility, mobile layout, backup",
+      "PASS: validation, add, due date, priority, category, repeat, search, sort, edit, history, theme, undo, persistence, accessibility, mobile layout, backup",
     );
     await client.send("Browser.close");
   } finally {

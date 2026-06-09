@@ -64,6 +64,16 @@
             </select>
           </label>
 
+          <label class="option-field">
+            <span>繰り返し</span>
+            <select id="repeat">
+              <option value="none">なし</option>
+              <option value="daily">毎日</option>
+              <option value="weekly">毎週</option>
+              <option value="monthly">毎月</option>
+            </select>
+          </label>
+
           <label class="option-field category-field">
             <span>カテゴリー</span>
             <input
@@ -203,6 +213,7 @@
         <div class="todo-meta">
           <span class="category-badge"></span>
           <time class="todo-due-date"></time>
+          <span class="repeat-badge"></span>
         </div>
       </div>
 
@@ -254,6 +265,16 @@
             <option value="high">高</option>
             <option value="medium">中</option>
             <option value="low">低</option>
+          </select>
+        </label>
+
+        <label class="dialog-field">
+          <span>繰り返し</span>
+          <select id="edit-repeat">
+            <option value="none">なし</option>
+            <option value="daily">毎日</option>
+            <option value="weekly">毎週</option>
+            <option value="monthly">毎月</option>
           </select>
         </label>
       </div>

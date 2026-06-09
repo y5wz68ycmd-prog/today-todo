@@ -1,12 +1,19 @@
 const STORAGE_KEY = "simple-todo-list";
 const HISTORY_KEY = `${STORAGE_KEY}-history`;
 const SETTINGS_KEY = `${STORAGE_KEY}-settings`;
-const BACKUP_VERSION = 2;
+const BACKUP_VERSION = 3;
 const PRIORITIES = new Set(["high", "medium", "low"]);
+const REPEATS = new Set(["none", "daily", "weekly", "monthly"]);
 const PRIORITY_LABELS = {
   high: "高",
   medium: "中",
   low: "低",
+};
+const REPEAT_LABELS = {
+  none: "",
+  daily: "毎日",
+  weekly: "毎週",
+  monthly: "毎月",
 };
 const PRIORITY_ORDER = {
   high: 0,
@@ -19,6 +26,7 @@ const elements = {
   input: document.querySelector("#todo-input"),
   dueDate: document.querySelector("#due-date"),
   priority: document.querySelector("#priority"),
+  repeat: document.querySelector("#repeat"),
   category: document.querySelector("#category"),
   formMessage: document.querySelector("#form-message"),
   list: document.querySelector("#todo-list"),
@@ -36,6 +44,7 @@ const elements = {
   editText: document.querySelector("#edit-text"),
   editDueDate: document.querySelector("#edit-due-date"),
   editPriority: document.querySelector("#edit-priority"),
+  editRepeat: document.querySelector("#edit-repeat"),
   editCategory: document.querySelector("#edit-category"),
   editMessage: document.querySelector("#edit-message"),
   editClose: document.querySelector("#edit-close"),
@@ -120,6 +129,7 @@ function normalizeTodo(todo, index = 0) {
     text: normalizeText(todo?.text).slice(0, 100),
     dueDate: normalizeDate(todo?.dueDate),
     priority: PRIORITIES.has(todo?.priority) ? todo.priority : "medium",
+    repeat: REPEATS.has(todo?.repeat) ? todo.repeat : "none",
     category: normalizeCategory(todo?.category),
     completed,
     createdAt: normalizeTimestamp(todo?.createdAt, fallbackTime),
@@ -224,6 +234,33 @@ function formatDueDate(todo) {
   return `${isOverdue(todo) ? "期限切れ" : "期限"}: ${formatted}`;
 }
 
+function getNextDueDate(todo) {
+  let nextDate = todo.dueDate
+    ? new Date(`${todo.dueDate}T00:00:00`)
+    : new Date(`${getLocalDateString()}T00:00:00`);
+  const today = getLocalDateString();
+
+  do {
+    if (todo.repeat === "daily") {
+      nextDate.setDate(nextDate.getDate() + 1);
+    } else if (todo.repeat === "weekly") {
+      nextDate.setDate(nextDate.getDate() + 7);
+    } else if (todo.repeat === "monthly") {
+      const originalDay = nextDate.getDate();
+      nextDate.setDate(1);
+      nextDate.setMonth(nextDate.getMonth() + 1);
+      const lastDay = new Date(
+        nextDate.getFullYear(),
+        nextDate.getMonth() + 1,
+        0,
+      ).getDate();
+      nextDate.setDate(Math.min(originalDay, lastDay));
+    }
+  } while (getLocalDateString(nextDate) <= today);
+
+  return getLocalDateString(nextDate);
+}
+
 function formatHistoryDate(timestamp) {
   return new Intl.DateTimeFormat("ja-JP", {
     month: "numeric",
@@ -296,6 +333,7 @@ function render() {
     const text = item.querySelector(".todo-text");
     const category = item.querySelector(".category-badge");
     const dueDate = item.querySelector(".todo-due-date");
+    const repeat = item.querySelector(".repeat-badge");
     const editButton = item.querySelector(".edit-button");
     const deleteButton = item.querySelector(".delete-button");
 
@@ -323,6 +361,15 @@ function render() {
     category.setAttribute("aria-label", `カテゴリー: ${todo.category}`);
     dueDate.dateTime = todo.dueDate;
     dueDate.textContent = formatDueDate(todo);
+    repeat.textContent = todo.repeat === "none"
+      ? ""
+      : `↻ ${REPEAT_LABELS[todo.repeat]}`;
+    repeat.setAttribute(
+      "aria-label",
+      todo.repeat === "none"
+        ? ""
+        : `繰り返し: ${REPEAT_LABELS[todo.repeat]}`,
+    );
 
     editButton.setAttribute("aria-label", `${todo.text}を編集`);
     deleteButton.setAttribute("aria-label", `${todo.text}を削除`);
@@ -390,13 +437,14 @@ function setFieldError(input, messageElement, message) {
   }
 }
 
-function addTodo(text, dueDate, priority, category) {
+function addTodo(text, dueDate, priority, repeat, category) {
   const now = Date.now();
   todos.push({
     id: createId(),
     text,
     dueDate,
     priority,
+    repeat,
     category,
     completed: false,
     createdAt: now,
@@ -409,6 +457,7 @@ function addTodo(text, dueDate, priority, category) {
 
 function toggleTodo(id) {
   const now = Date.now();
+  let recurringMessage = "";
 
   todos = todos.map((todo) => {
     if (todo.id !== id) {
@@ -425,6 +474,21 @@ function toggleTodo(id) {
         completedAt: now,
       });
       history = history.slice(0, 200);
+
+      if (todo.repeat !== "none") {
+        const nextDueDate = getNextDueDate(todo);
+        recurringMessage =
+          `${REPEAT_LABELS[todo.repeat]}の次回タスクを` +
+          `${formatDueDate({ ...todo, dueDate: nextDueDate })}に設定しました。`;
+
+        return {
+          ...todo,
+          dueDate: nextDueDate,
+          completed: false,
+          completedAt: null,
+          updatedAt: now,
+        };
+      }
     }
 
     return {
@@ -438,6 +502,10 @@ function toggleTodo(id) {
   saveTodos();
   saveHistory();
   render();
+
+  if (recurringMessage) {
+    showToast(recurringMessage);
+  }
 }
 
 function deleteTodo(id) {
@@ -470,6 +538,7 @@ function openEditDialog(id) {
   elements.editText.value = todo.text;
   elements.editDueDate.value = todo.dueDate;
   elements.editPriority.value = todo.priority;
+  elements.editRepeat.value = todo.repeat;
   elements.editCategory.value =
     todo.category === "未分類" ? "" : todo.category;
   elements.editMessage.textContent = "";
@@ -642,10 +711,12 @@ elements.form.addEventListener("submit", (event) => {
     PRIORITIES.has(elements.priority.value)
       ? elements.priority.value
       : "medium",
+    REPEATS.has(elements.repeat.value) ? elements.repeat.value : "none",
     normalizeCategory(elements.category.value),
   );
   elements.form.reset();
   elements.priority.value = "medium";
+  elements.repeat.value = "none";
   setFieldError(elements.input, elements.formMessage, "");
   elements.input.focus();
 });
@@ -675,6 +746,9 @@ elements.editForm.addEventListener("submit", (event) => {
           priority: PRIORITIES.has(elements.editPriority.value)
             ? elements.editPriority.value
             : "medium",
+          repeat: REPEATS.has(elements.editRepeat.value)
+            ? elements.editRepeat.value
+            : "none",
           category: normalizeCategory(elements.editCategory.value),
           updatedAt: Date.now(),
         }

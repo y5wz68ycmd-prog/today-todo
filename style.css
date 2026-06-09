@@ -222,7 +222,7 @@ input::placeholder {
 .task-options {
   padding: 6px 15px 2px;
   display: grid;
-  grid-template-columns: auto auto minmax(130px, 1fr);
+  grid-template-columns: auto auto auto minmax(130px, 1fr);
   gap: 16px;
 }
 
@@ -477,7 +477,8 @@ input::placeholder {
 }
 
 .category-badge,
-.todo-due-date {
+.todo-due-date,
+.repeat-badge {
   width: fit-content;
   font-size: 0.72rem;
   font-weight: 700;
@@ -498,6 +499,14 @@ input::placeholder {
   display: none;
 }
 
+.repeat-badge {
+  color: var(--warning);
+}
+
+.repeat-badge:empty {
+  display: none;
+}
+
 .todo-item.overdue .todo-due-date {
   color: var(--danger);
 }
@@ -508,7 +517,8 @@ input::placeholder {
 }
 
 .todo-item.completed .todo-due-date,
-.todo-item.completed .category-badge {
+.todo-item.completed .category-badge,
+.todo-item.completed .repeat-badge {
   opacity: 0.65;
 }
 
