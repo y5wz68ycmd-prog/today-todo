@@ -439,6 +439,7 @@
       </div>
 
       <p class="sync-status" id="sync-status" role="status"></p>
+      <p class="sync-detail" id="sync-detail"></p>
 
       <div class="sync-setup" id="sync-setup">
         <p>
@@ -464,6 +465,9 @@
         </label>
         <p class="form-message" id="sync-message" role="alert"></p>
         <div class="dialog-actions">
+          <button class="text-button" id="sync-reset-request" type="button">
+            パスワードを忘れた
+          </button>
           <button class="secondary-button" id="sync-signup" type="button">
             アカウント作成
           </button>
@@ -471,16 +475,53 @@
         </div>
       </form>
 
+      <section class="sync-conflict" id="sync-conflict" hidden>
+        <h3>別の端末にも変更があります</h3>
+        <p>
+          上書きすると、選ばなかった側の変更は失われます。
+          内容を確認して、採用するデータを選んでください。
+        </p>
+        <div class="sync-action-grid">
+          <button class="primary-button" id="sync-keep-local" type="button">
+            この端末を採用
+          </button>
+          <button class="secondary-button" id="sync-use-cloud" type="button">
+            クラウドを採用
+          </button>
+        </div>
+      </section>
+
+      <section class="sync-recovery" id="sync-recovery" hidden>
+        <h3>新しいパスワードを設定</h3>
+        <label class="dialog-field">
+          <span>新しいパスワード</span>
+          <input
+            id="sync-new-password"
+            type="password"
+            minlength="8"
+            autocomplete="new-password"
+          >
+        </label>
+        <p class="form-message" id="sync-recovery-message" role="alert"></p>
+        <button
+          class="primary-button"
+          id="sync-update-password"
+          type="button"
+        >
+          パスワードを更新
+        </button>
+      </section>
+
       <div class="sync-controls" id="sync-controls" hidden>
         <p>
           ログイン中: <strong id="sync-user-email"></strong>
         </p>
         <div class="sync-action-grid">
           <button class="primary-button" id="sync-upload" type="button">
-            クラウドへ保存
+            今すぐ同期
           </button>
           <button class="secondary-button" id="sync-download" type="button">
-            クラウドから復元
+            クラウドを確認
           </button>
         </div>
         <div class="dialog-actions">

@@ -12,10 +12,15 @@
 window.TODO_SYNC_CONFIG = {
   supabaseUrl: "https://YOUR_PROJECT.supabase.co",
   supabaseAnonKey: "YOUR_PUBLISHABLE_KEY",
+  redirectUrl: "https://YOUR_NAME.github.io/YOUR_REPOSITORY/",
 };
 ```
 
 公開用キーはブラウザアプリで使うことを前提としたキーです。`service_role`キーは絶対に設定しないでください。
+
+Supabaseの **Authentication > URL Configuration** で、`Site URL` と
+`Redirect URLs` に同じ公開URLを登録してください。確認メールと
+パスワード再設定メールからアプリへ戻るために必要です。
 
 ## 2. 保存テーブル
 
@@ -49,7 +54,9 @@ with check ((select auth.uid()) = user_id);
 
 ## 3. 公開
 
-設定後にコミットしてGitHubへプッシュします。アプリの「端末間同期」からアカウントを作成し、クラウド保存と復元を利用できます。
+設定後にコミットしてGitHubへプッシュします。アプリの「端末間同期」から
+アカウントを作成すると、変更は自動保存されます。オフライン中の変更は
+接続の復帰後に同期され、端末間で競合した場合は採用する内容を選べます。
 
 参考:
 

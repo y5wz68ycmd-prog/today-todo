@@ -424,6 +424,29 @@ async function evaluate(client, expression) {
       )),
       "同期設定後にログイン欄が表示されませんでした",
     );
+    assert(
+      await evaluate(
+        client,
+        `JSON.parse(localStorage.getItem("simple-todo-list-sync-meta")).pending`,
+      ),
+      "端末内の変更が同期待ちとして記録されませんでした",
+    );
+    assert(
+      (await evaluate(
+        client,
+        `document.querySelector("#sync-reset-request").textContent`,
+      )).includes("パスワード"),
+      "パスワード再設定の入口が表示されませんでした",
+    );
+    assert(
+      await evaluate(
+        client,
+        `typeof synchronize === "function" &&
+         typeof refreshSyncSession === "function" &&
+         typeof requestPasswordReset === "function"`,
+      ),
+      "自動同期または認証更新の処理が読み込まれていません",
+    );
     await evaluate(client, `document.querySelector("#sync-close").click()`);
 
     await evaluate(
@@ -581,8 +604,114 @@ async function evaluate(client, expression) {
       "旧バックアップのサブタスクを移行できませんでした",
     );
 
+    const syncFlow = await evaluate(
+      client,
+      `(async () => {
+        const originalFetch = window.fetch;
+        let refreshCalls = 0;
+        const cloudRow = {
+          updated_at: "2026-06-11T02:00:00.000Z",
+          payload: {
+            version: 5,
+            todos: [{
+              id: "cloud-task",
+              text: "クラウド側のタスク",
+              dueDate: "",
+              priority: "medium",
+              repeat: "none",
+              reminderTime: "",
+              notifiedFor: "",
+              subtasks: [],
+              category: "未分類",
+              completed: false,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              completedAt: null,
+              order: 0
+            }],
+            history: [],
+            settings: { theme: "light", sort: "oldest" },
+            sync: {
+              deviceId: "other-device",
+              revision: 4,
+              updatedAt: "2026-06-11T02:00:00.000Z"
+            }
+          }
+        };
+
+        window.fetch = async (url) => {
+          if (String(url).includes("grant_type=refresh_token")) {
+            refreshCalls += 1;
+            return new Response(JSON.stringify({
+              access_token: "fresh-token",
+              refresh_token: "fresh-refresh",
+              expires_in: 3600,
+              user: { id: "test-user", email: "test@example.com" }
+            }), { status: 200 });
+          }
+
+          return new Response(JSON.stringify([cloudRow]), { status: 200 });
+        };
+
+        syncSession = {
+          access_token: "expired-token",
+          refresh_token: "refresh-token",
+          expires_at: 1,
+          user: { id: "test-user", email: "test@example.com" }
+        };
+        syncMeta.accountId = "test-user";
+        syncMeta.lastCloudUpdatedAt = "2026-06-11T01:00:00.000Z";
+        syncMeta.pending = true;
+        syncMeta.conflict = false;
+        saveSyncMeta();
+
+        await refreshSyncSession();
+        await synchronize();
+        const result = {
+          refreshCalls,
+          accessToken: syncSession.access_token,
+          conflict: syncMeta.conflict,
+          conflictVisible: !document.querySelector("#sync-conflict").hidden,
+          canonicalMatch:
+            getPayloadFingerprint({
+              settings: { theme: "light", sort: "oldest" }
+            }) === getPayloadFingerprint({
+              settings: { sort: "oldest", theme: "light" }
+            }),
+          timestampMatch: timestampsMatch(
+            "2026-06-11T02:00:00.000Z",
+            "2026-06-11T02:00:00+00:00"
+          )
+        };
+
+        applyCloudRow(pendingCloudRow);
+        result.cloudApplied =
+          document.querySelector(".todo-text").textContent ===
+          "クラウド側のタスク";
+        result.pendingAfterApply = syncMeta.pending;
+        window.fetch = originalFetch;
+        return result;
+      })()`,
+    );
+    assert(
+      syncFlow.refreshCalls === 1 && syncFlow.accessToken === "fresh-token",
+      `期限切れのログインセッションを更新できませんでした: ${JSON.stringify(syncFlow)}`,
+    );
+    assert(
+      syncFlow.conflict && syncFlow.conflictVisible,
+      "端末間の変更競合を検出・表示できませんでした",
+    );
+    assert(
+      syncFlow.canonicalMatch && syncFlow.timestampMatch,
+      "クラウドデータの内容または更新時刻を正規化して比較できませんでした",
+    );
+    assert(
+      syncFlow.cloudApplied && !syncFlow.pendingAfterApply,
+      "競合時にクラウド側の内容を採用できませんでした",
+    );
+
     console.log(
-      "PASS: validation, add, due date, reminder, priority, category, repeat, subtasks, manual order, search, sort, edit, history, theme, undo, persistence, accessibility, mobile layout, PWA, sync config, backup",
+      "PASS: validation, add, due date, reminder, priority, category, repeat, subtasks, manual order, search, sort, edit, history, theme, undo, persistence, accessibility, mobile layout, PWA, auto sync, conflict handling, session refresh, password reset, backup",
     );
     await client.send("Browser.close");
   } finally {

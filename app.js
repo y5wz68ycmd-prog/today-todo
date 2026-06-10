@@ -2,6 +2,8 @@ const STORAGE_KEY = "simple-todo-list";
 const HISTORY_KEY = `${STORAGE_KEY}-history`;
 const SETTINGS_KEY = `${STORAGE_KEY}-settings`;
 const SYNC_SESSION_KEY = `${STORAGE_KEY}-sync-session`;
+const SYNC_META_KEY = `${STORAGE_KEY}-sync-meta`;
+const AUTO_SYNC_DELAY = 1200;
 const BACKUP_VERSION = 5;
 const PRIORITIES = new Set(["high", "medium", "low"]);
 const REPEATS = new Set(["none", "daily", "weekly", "monthly"]);
@@ -70,12 +72,21 @@ const elements = {
   syncClose: document.querySelector("#sync-close"),
   syncDone: document.querySelector("#sync-done"),
   syncStatus: document.querySelector("#sync-status"),
+  syncDetail: document.querySelector("#sync-detail"),
   syncSetup: document.querySelector("#sync-setup"),
   syncAuthForm: document.querySelector("#sync-auth-form"),
   syncEmail: document.querySelector("#sync-email"),
   syncPassword: document.querySelector("#sync-password"),
   syncMessage: document.querySelector("#sync-message"),
   syncSignup: document.querySelector("#sync-signup"),
+  syncResetRequest: document.querySelector("#sync-reset-request"),
+  syncConflict: document.querySelector("#sync-conflict"),
+  syncKeepLocal: document.querySelector("#sync-keep-local"),
+  syncUseCloud: document.querySelector("#sync-use-cloud"),
+  syncRecovery: document.querySelector("#sync-recovery"),
+  syncNewPassword: document.querySelector("#sync-new-password"),
+  syncRecoveryMessage: document.querySelector("#sync-recovery-message"),
+  syncUpdatePassword: document.querySelector("#sync-update-password"),
   syncControls: document.querySelector("#sync-controls"),
   syncUserEmail: document.querySelector("#sync-user-email"),
   syncUpload: document.querySelector("#sync-upload"),
@@ -101,14 +112,20 @@ let undoAction = null;
 let draggedTodoId = null;
 let installPrompt = null;
 let editingSubtasks = [];
+let autoSyncTimer = null;
+let syncInProgress = false;
+let pendingCloudRow = null;
+let suppressSyncTracking = true;
 const syncConfig = {
   supabaseUrl: String(window.TODO_SYNC_CONFIG?.supabaseUrl ?? "")
     .replace(/\/+$/, ""),
   supabaseAnonKey: String(
     window.TODO_SYNC_CONFIG?.supabaseAnonKey ?? "",
   ),
+  redirectUrl: String(window.TODO_SYNC_CONFIG?.redirectUrl ?? ""),
 };
 let syncSession = loadSyncSession();
+let syncMeta = loadSyncMeta();
 
 document.querySelector("#today").textContent = new Intl.DateTimeFormat("ja-JP", {
   year: "numeric",
@@ -137,13 +154,17 @@ function parseStoredArray(key) {
 function loadSyncSession() {
   try {
     const session = JSON.parse(localStorage.getItem(SYNC_SESSION_KEY));
-    return session?.access_token && session?.user ? session : null;
+    return session?.access_token ? session : null;
   } catch {
     return null;
   }
 }
 
 function saveSyncSession(session) {
+  if (session?.expires_in && !session.expires_at) {
+    session.expires_at = Math.floor(Date.now() / 1000) + session.expires_in;
+  }
+
   syncSession = session;
 
   if (session) {
@@ -153,6 +174,77 @@ function saveSyncSession(session) {
   }
 
   updateSyncUI();
+}
+
+function loadSyncMeta() {
+  const defaults = {
+    deviceId: createId(),
+    localRevision: 0,
+    localUpdatedAt: "",
+    lastSyncedRevision: 0,
+    lastCloudUpdatedAt: "",
+    accountId: "",
+    pending: false,
+    conflict: false,
+  };
+
+  try {
+    const stored = JSON.parse(localStorage.getItem(SYNC_META_KEY));
+    return {
+      ...defaults,
+      ...stored,
+      deviceId: typeof stored?.deviceId === "string"
+        ? stored.deviceId
+        : defaults.deviceId,
+      localRevision: Number.isFinite(stored?.localRevision)
+        ? stored.localRevision
+        : 0,
+      lastSyncedRevision: Number.isFinite(stored?.lastSyncedRevision)
+        ? stored.lastSyncedRevision
+        : 0,
+      accountId: typeof stored?.accountId === "string"
+        ? stored.accountId
+        : "",
+      pending: Boolean(stored?.pending),
+      conflict: Boolean(stored?.conflict),
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+function saveSyncMeta() {
+  localStorage.setItem(SYNC_META_KEY, JSON.stringify(syncMeta));
+  updateSyncUI();
+}
+
+function connectSyncAccount(user) {
+  if (!user?.id) {
+    return;
+  }
+
+  if (syncMeta.accountId && syncMeta.accountId !== user.id) {
+    syncMeta.lastSyncedRevision = 0;
+    syncMeta.lastCloudUpdatedAt = "";
+    syncMeta.pending = false;
+    syncMeta.conflict = false;
+    pendingCloudRow = null;
+  }
+
+  syncMeta.accountId = user.id;
+  saveSyncMeta();
+}
+
+function markLocalChange() {
+  if (suppressSyncTracking) {
+    return;
+  }
+
+  syncMeta.localRevision += 1;
+  syncMeta.localUpdatedAt = new Date().toISOString();
+  syncMeta.pending = true;
+  saveSyncMeta();
+  scheduleAutoSync();
 }
 
 function isSyncConfigured() {
@@ -271,14 +363,17 @@ function loadSettings() {
 
 function saveTodos() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
+  markLocalChange();
 }
 
 function saveHistory() {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  markLocalChange();
 }
 
 function saveSettings() {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  markLocalChange();
 }
 
 function getLocalDateString(date = new Date()) {
@@ -973,30 +1068,111 @@ function showToast(message, action = null) {
   }, 5000);
 }
 
+function getSyncRedirectUrl() {
+  if (syncConfig.redirectUrl) {
+    return syncConfig.redirectUrl;
+  }
+
+  return location.protocol === "file:"
+    ? ""
+    : `${location.origin}${location.pathname}`;
+}
+
+async function refreshSyncSession(force = false) {
+  if (!syncSession?.refresh_token) {
+    return Boolean(syncSession?.access_token);
+  }
+
+  const expiresAt = Number(syncSession.expires_at || 0);
+  const hasTimeRemaining = expiresAt > Math.floor(Date.now() / 1000) + 90;
+
+  if (!force && hasTimeRemaining) {
+    return true;
+  }
+
+  const response = await fetch(
+    `${syncConfig.supabaseUrl}/auth/v1/token?grant_type=refresh_token`,
+    {
+      method: "POST",
+      headers: {
+        apikey: syncConfig.supabaseAnonKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ refresh_token: syncSession.refresh_token }),
+    },
+  );
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : null;
+
+  if (!response.ok) {
+    if ([400, 401].includes(response.status)) {
+      saveSyncSession(null);
+    }
+    throw new Error(
+      data?.msg ||
+        data?.message ||
+        data?.error_description ||
+        "ログイン状態を更新できませんでした。",
+    );
+  }
+
+  saveSyncSession({
+    ...syncSession,
+    ...data,
+    expires_at: data?.expires_at ||
+      Math.floor(Date.now() / 1000) + Number(data?.expires_in || 3600),
+    user: data?.user || syncSession.user,
+  });
+  return true;
+}
+
 async function syncRequest(path, options = {}) {
   if (!isSyncConfigured()) {
     throw new Error("同期設定がありません。");
   }
 
+  const {
+    skipAuth = false,
+    retryAuth = true,
+    ...requestOptions
+  } = options;
+
+  if (!skipAuth && syncSession?.access_token) {
+    await refreshSyncSession();
+  }
+
   const headers = {
     apikey: syncConfig.supabaseAnonKey,
     "Content-Type": "application/json",
-    ...options.headers,
+    ...requestOptions.headers,
   };
 
-  if (syncSession?.access_token) {
+  if (!skipAuth && syncSession?.access_token) {
     headers.Authorization = `Bearer ${syncSession.access_token}`;
   }
 
   const response = await fetch(`${syncConfig.supabaseUrl}${path}`, {
-    ...options,
+    ...requestOptions,
     headers,
   });
   const text = await response.text();
   const data = text ? JSON.parse(text) : null;
 
   if (!response.ok) {
-    if (response.status === 401) {
+    if (
+      response.status === 401 &&
+      !skipAuth &&
+      retryAuth &&
+      syncSession?.refresh_token
+    ) {
+      await refreshSyncSession(true);
+      return syncRequest(path, {
+        ...options,
+        retryAuth: false,
+      });
+    }
+
+    if (response.status === 401 && !skipAuth) {
       saveSyncSession(null);
     }
 
@@ -1014,17 +1190,51 @@ async function syncRequest(path, options = {}) {
 function updateSyncUI() {
   const configured = isSyncConfigured();
   const loggedIn = configured && Boolean(syncSession?.access_token);
+  const offline = !navigator.onLine;
 
   elements.syncSetup.hidden = configured;
   elements.syncAuthForm.hidden = !configured || loggedIn;
   elements.syncControls.hidden = !loggedIn;
-  elements.syncButton.textContent = loggedIn ? "同期済み端末" : "端末間同期";
+  elements.syncConflict.hidden = !loggedIn || !syncMeta.conflict;
+  elements.syncButton.textContent = !loggedIn
+    ? "端末間同期"
+    : syncMeta.conflict
+      ? "同期を確認"
+      : syncMeta.pending
+        ? "同期待ち"
+        : "同期済み";
   elements.syncStatus.textContent = !configured
     ? "同期設定がまだありません。"
     : loggedIn
-      ? "クラウドへ保存、または別端末のデータを復元できます。"
+      ? "変更はクラウドへ自動保存されます。"
       : "アカウントへログインしてください。";
   elements.syncUserEmail.textContent = syncSession?.user?.email || "";
+
+  if (!loggedIn) {
+    elements.syncDetail.textContent = "";
+  } else if (syncMeta.conflict) {
+    elements.syncDetail.textContent =
+      "この端末とクラウドの両方に変更があります。残す内容を選んでください。";
+  } else if (offline) {
+    elements.syncDetail.textContent =
+      "オフラインです。変更は接続が戻ったときに同期します。";
+  } else if (syncInProgress) {
+    elements.syncDetail.textContent = "クラウドを確認しています...";
+  } else if (syncMeta.pending) {
+    elements.syncDetail.textContent = "未同期の変更があります。";
+  } else if (syncMeta.lastCloudUpdatedAt) {
+    elements.syncDetail.textContent = `最終同期: ${new Intl.DateTimeFormat(
+      "ja-JP",
+      {
+        month: "numeric",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      },
+    ).format(new Date(syncMeta.lastCloudUpdatedAt))}`;
+  } else {
+    elements.syncDetail.textContent = "クラウドとの同期を準備しています。";
+  }
 }
 
 async function authenticateSync(mode) {
@@ -1040,12 +1250,16 @@ async function authenticateSync(mode) {
   elements.syncMessage.textContent = "";
 
   try {
-    const path = mode === "signup"
-      ? "/auth/v1/signup"
+    const redirectUrl = getSyncRedirectUrl();
+    const path = mode === "signup" && redirectUrl
+      ? `/auth/v1/signup?redirect_to=${encodeURIComponent(redirectUrl)}`
+      : mode === "signup"
+        ? "/auth/v1/signup"
       : "/auth/v1/token?grant_type=password";
     const data = await syncRequest(path, {
       method: "POST",
       body: JSON.stringify({ email, password }),
+      skipAuth: true,
     });
     const session = data.session || data;
 
@@ -1056,8 +1270,10 @@ async function authenticateSync(mode) {
     }
 
     saveSyncSession(session);
+    connectSyncAccount(session.user);
     elements.syncPassword.value = "";
     showToast("クラウド同期へログインしました。");
+    await synchronize({ startup: true });
   } catch (error) {
     elements.syncMessage.textContent = error.message;
   }
@@ -1069,10 +1285,88 @@ function getSyncPayload() {
     todos,
     history,
     settings,
+    sync: {
+      deviceId: syncMeta.deviceId,
+      revision: syncMeta.localRevision,
+      updatedAt: syncMeta.localUpdatedAt || new Date().toISOString(),
+    },
   };
 }
 
-async function uploadSyncData() {
+function canonicalizeSyncValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeSyncValue);
+  }
+
+  if (value && typeof value === "object") {
+    return Object.keys(value)
+      .sort()
+      .reduce((result, key) => {
+        result[key] = canonicalizeSyncValue(value[key]);
+        return result;
+      }, {});
+  }
+
+  return value;
+}
+
+function getPayloadFingerprint(payload) {
+  return JSON.stringify(canonicalizeSyncValue({
+    todos: payload?.todos || [],
+    history: payload?.history || [],
+    settings: payload?.settings || {},
+  }));
+}
+
+function timestampsMatch(left, right) {
+  const leftTime = Date.parse(left);
+  const rightTime = Date.parse(right);
+
+  return !Number.isNaN(leftTime) &&
+    !Number.isNaN(rightTime) &&
+    leftTime === rightTime;
+}
+
+function hasLocalData() {
+  return todos.length > 0 || history.length > 0;
+}
+
+async function ensureSyncUser() {
+  if (syncSession?.user?.id) {
+    connectSyncAccount(syncSession.user);
+    return syncSession.user;
+  }
+
+  const user = await syncRequest("/auth/v1/user");
+  saveSyncSession({ ...syncSession, user });
+  connectSyncAccount(user);
+  return user;
+}
+
+async function fetchCloudRow() {
+  const user = await ensureSyncUser();
+  const rows = await syncRequest(
+    `/rest/v1/todo_sync?user_id=eq.${encodeURIComponent(
+      user.id,
+    )}&select=payload,updated_at`,
+  );
+  return rows?.[0] || null;
+}
+
+async function uploadSyncData({ interactive = false } = {}) {
+  if (!navigator.onLine) {
+    syncMeta.pending = true;
+    saveSyncMeta();
+    if (interactive) {
+      showToast("オフラインです。接続が戻ったら自動で同期します。");
+    }
+    return false;
+  }
+
+  const user = await ensureSyncUser();
+  const revision = syncMeta.localRevision;
+  const updatedAt = new Date().toISOString();
+
   try {
     await syncRequest("/rest/v1/todo_sync?on_conflict=user_id", {
       method: "POST",
@@ -1080,14 +1374,32 @@ async function uploadSyncData() {
         Prefer: "resolution=merge-duplicates,return=minimal",
       },
       body: JSON.stringify({
-        user_id: syncSession.user.id,
+        user_id: user.id,
         payload: getSyncPayload(),
-        updated_at: new Date().toISOString(),
+        updated_at: updatedAt,
       }),
     });
-    showToast("クラウドへ保存しました。");
+    syncMeta.lastCloudUpdatedAt = updatedAt;
+    syncMeta.lastSyncedRevision = revision;
+    syncMeta.pending = syncMeta.localRevision !== revision;
+    syncMeta.conflict = false;
+    pendingCloudRow = null;
+    saveSyncMeta();
+    if (syncMeta.pending) {
+      scheduleAutoSync();
+    }
+    if (interactive) {
+      showToast("クラウドと同期しました。");
+    }
+    return true;
   } catch (error) {
-    showToast(error.message);
+    syncMeta.pending = true;
+    saveSyncMeta();
+    scheduleAutoSync(10 * 1000);
+    if (interactive) {
+      showToast(error.message);
+    }
+    return false;
   }
 }
 
@@ -1108,65 +1420,250 @@ function normalizeImportedHistory(entries) {
 }
 
 function applySyncedPayload(payload) {
-  todos = Array.isArray(payload?.todos)
-    ? payload.todos.map(normalizeTodo).filter((todo) => todo.text)
-    : [];
-  history = normalizeImportedHistory(payload?.history);
+  const previousTracking = suppressSyncTracking;
+  suppressSyncTracking = true;
+  try {
+    todos = Array.isArray(payload?.todos)
+      ? payload.todos.map(normalizeTodo).filter((todo) => todo.text)
+      : [];
+    history = normalizeImportedHistory(payload?.history);
 
-  if (payload?.settings) {
-    settings = {
-      ...settings,
-      theme: ["light", "dark"].includes(payload.settings.theme)
-        ? payload.settings.theme
-        : settings.theme,
-      sort: [
-        "manual",
-        "newest",
-        "oldest",
-        "due",
-        "priority",
-        "category",
-      ].includes(payload.settings.sort)
-        ? payload.settings.sort
-        : settings.sort,
-    };
+    if (payload?.settings) {
+      settings = {
+        ...settings,
+        theme: ["light", "dark"].includes(payload.settings.theme)
+          ? payload.settings.theme
+          : settings.theme,
+        sort: [
+          "manual",
+          "newest",
+          "oldest",
+          "due",
+          "priority",
+          "category",
+        ].includes(payload.settings.sort)
+          ? payload.settings.sort
+          : settings.sort,
+      };
+    }
+
+    currentSort = settings.sort;
+    elements.sort.value = currentSort;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+    saveSettings();
+    setTheme(settings.theme);
+    render();
+  } finally {
+    suppressSyncTracking = previousTracking;
   }
-
-  currentSort = settings.sort;
-  elements.sort.value = currentSort;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-  saveSettings();
-  setTheme(settings.theme);
-  render();
 }
 
-async function downloadSyncData() {
+function applyCloudRow(row) {
+  if (!row?.payload) {
+    return;
+  }
+
+  applySyncedPayload(row.payload);
+  const remoteRevision = Number(row.payload.sync?.revision || 0);
+  syncMeta.localRevision = Math.max(syncMeta.localRevision, remoteRevision);
+  syncMeta.localUpdatedAt =
+    row.payload.sync?.updatedAt || row.updated_at || new Date().toISOString();
+  syncMeta.lastSyncedRevision = syncMeta.localRevision;
+  syncMeta.lastCloudUpdatedAt = row.updated_at || syncMeta.localUpdatedAt;
+  syncMeta.pending = false;
+  syncMeta.conflict = false;
+  pendingCloudRow = null;
+  saveSyncMeta();
+}
+
+function setSyncConflict(row) {
+  pendingCloudRow = row;
+  syncMeta.conflict = true;
+  saveSyncMeta();
+  showToast("別の端末にも変更があります。同期画面で内容を選んでください。");
+}
+
+async function synchronize({ interactive = false, startup = false } = {}) {
+  if (
+    syncInProgress ||
+    !isSyncConfigured() ||
+    !syncSession?.access_token
+  ) {
+    return;
+  }
+
+  if (!navigator.onLine) {
+    updateSyncUI();
+    return;
+  }
+
+  syncInProgress = true;
+  updateSyncUI();
+
   try {
-    const rows = await syncRequest(
-      `/rest/v1/todo_sync?user_id=eq.${encodeURIComponent(
-        syncSession.user.id,
-      )}&select=payload,updated_at`,
-    );
-    const row = rows?.[0];
+    const row = await fetchCloudRow();
 
     if (!row?.payload) {
-      showToast("クラウドに保存されたデータはありません。");
+      await uploadSyncData({ interactive });
       return;
     }
 
-    if (
-      !window.confirm(
-        "現在の端末データをクラウドの内容で置き換えますか？",
-      )
-    ) {
+    const localFingerprint = getPayloadFingerprint(getSyncPayload());
+    const cloudFingerprint = getPayloadFingerprint(row.payload);
+    const sameContent = localFingerprint === cloudFingerprint;
+    const cloudChanged = syncMeta.lastCloudUpdatedAt
+      ? !timestampsMatch(row.updated_at, syncMeta.lastCloudUpdatedAt)
+      : !sameContent;
+
+    if (sameContent) {
+      syncMeta.lastCloudUpdatedAt = row.updated_at;
+      syncMeta.lastSyncedRevision = syncMeta.localRevision;
+      syncMeta.pending = false;
+      syncMeta.conflict = false;
+      pendingCloudRow = null;
+      saveSyncMeta();
+      if (interactive) {
+        showToast("すでに最新の状態です。");
+      }
       return;
     }
 
-    applySyncedPayload(row.payload);
-    showToast("クラウドから復元しました。");
+    if (syncMeta.pending && cloudChanged) {
+      setSyncConflict(row);
+      return;
+    }
+
+    if (syncMeta.pending) {
+      await uploadSyncData({ interactive });
+      return;
+    }
+
+    if (!syncMeta.lastCloudUpdatedAt && hasLocalData()) {
+      setSyncConflict(row);
+      return;
+    }
+
+    if (cloudChanged || startup) {
+      applyCloudRow(row);
+      if (interactive) {
+        showToast("クラウドの最新データを読み込みました。");
+      }
+    }
   } catch (error) {
-    showToast(error.message);
+    if (syncMeta.pending) {
+      scheduleAutoSync(10 * 1000);
+    }
+    if (interactive) {
+      showToast(error.message);
+    }
+  } finally {
+    syncInProgress = false;
+    updateSyncUI();
+  }
+}
+
+function scheduleAutoSync(delay = AUTO_SYNC_DELAY) {
+  clearTimeout(autoSyncTimer);
+
+  if (
+    !syncMeta.pending ||
+    syncMeta.conflict ||
+    !syncSession?.access_token
+  ) {
+    return;
+  }
+
+  autoSyncTimer = setTimeout(() => {
+    synchronize();
+  }, delay);
+}
+
+async function requestPasswordReset() {
+  const email = normalizeText(elements.syncEmail.value);
+  const redirectUrl = getSyncRedirectUrl();
+
+  if (!email) {
+    elements.syncMessage.textContent =
+      "再設定メールを受け取るメールアドレスを入力してください。";
+    return;
+  }
+
+  if (!redirectUrl) {
+    elements.syncMessage.textContent =
+      "パスワード再設定は公開版のアプリから利用してください。";
+    return;
+  }
+
+  try {
+    await syncRequest(
+      `/auth/v1/recover?redirect_to=${encodeURIComponent(redirectUrl)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ email }),
+        skipAuth: true,
+      },
+    );
+    elements.syncMessage.textContent =
+      "パスワード再設定メールを送信しました。";
+  } catch (error) {
+    elements.syncMessage.textContent = error.message;
+  }
+}
+
+async function handleAuthRedirect() {
+  const params = new URLSearchParams(location.hash.slice(1));
+  const accessToken = params.get("access_token");
+
+  if (!accessToken) {
+    return;
+  }
+
+  saveSyncSession({
+    access_token: accessToken,
+    refresh_token: params.get("refresh_token") || "",
+    token_type: params.get("token_type") || "bearer",
+    expires_in: Number(params.get("expires_in") || 3600),
+  });
+
+  try {
+    await ensureSyncUser();
+  } catch (error) {
+    elements.syncRecoveryMessage.textContent = error.message;
+  }
+
+  if (params.get("type") === "recovery") {
+    elements.syncRecovery.hidden = false;
+    elements.syncDialog.showModal();
+    elements.syncNewPassword.focus();
+  } else {
+    history.replaceState(null, "", `${location.pathname}${location.search}`);
+    await synchronize({ startup: true });
+  }
+}
+
+async function updatePassword() {
+  const password = elements.syncNewPassword.value;
+
+  if (password.length < 8) {
+    elements.syncRecoveryMessage.textContent =
+      "新しいパスワードは8文字以上で入力してください。";
+    return;
+  }
+
+  try {
+    await syncRequest("/auth/v1/user", {
+      method: "PUT",
+      body: JSON.stringify({ password }),
+    });
+    elements.syncNewPassword.value = "";
+    elements.syncRecoveryMessage.textContent = "";
+    elements.syncRecovery.hidden = true;
+    history.replaceState(null, "", `${location.pathname}${location.search}`);
+    showToast("パスワードを更新しました。");
+    await synchronize({ startup: true });
+  } catch (error) {
+    elements.syncRecoveryMessage.textContent = error.message;
   }
 }
 
@@ -1576,14 +2073,42 @@ elements.syncAuthForm.addEventListener("submit", (event) => {
 elements.syncSignup.addEventListener("click", () => {
   authenticateSync("signup");
 });
-elements.syncUpload.addEventListener("click", uploadSyncData);
-elements.syncDownload.addEventListener("click", downloadSyncData);
+elements.syncResetRequest.addEventListener("click", requestPasswordReset);
+elements.syncUpload.addEventListener("click", () => {
+  synchronize({ interactive: true });
+});
+elements.syncDownload.addEventListener("click", () => {
+  synchronize({ interactive: true, startup: true });
+});
+elements.syncKeepLocal.addEventListener("click", async () => {
+  syncMeta.conflict = false;
+  saveSyncMeta();
+  await uploadSyncData({ interactive: true });
+});
+elements.syncUseCloud.addEventListener("click", async () => {
+  try {
+    const row = pendingCloudRow || await fetchCloudRow();
+    if (!row?.payload) {
+      showToast("クラウドに保存されたデータはありません。");
+      return;
+    }
+    applyCloudRow(row);
+    showToast("クラウドの内容をこの端末へ反映しました。");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+elements.syncUpdatePassword.addEventListener("click", updatePassword);
 elements.syncLogout.addEventListener("click", async () => {
   try {
     await syncRequest("/auth/v1/logout", { method: "POST" });
   } catch {
     // Clear the local session even if the remote session already expired.
   }
+  clearTimeout(autoSyncTimer);
+  syncMeta.conflict = false;
+  pendingCloudRow = null;
+  saveSyncMeta();
   saveSyncSession(null);
   showToast("クラウド同期からログアウトしました。");
 });
@@ -1612,7 +2137,36 @@ render();
 updateSyncUI();
 updateNotificationButton();
 checkReminders();
+suppressSyncTracking = false;
 setInterval(checkReminders, 30 * 1000);
+setInterval(() => {
+  if (syncSession?.access_token && navigator.onLine) {
+    refreshSyncSession().catch(() => {
+      updateSyncUI();
+    });
+  }
+}, 4 * 60 * 1000);
+
+window.addEventListener("online", () => {
+  synchronize({ startup: true });
+});
+window.addEventListener("offline", updateSyncUI);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    synchronize({ startup: true });
+  }
+});
+
+handleAuthRedirect()
+  .then(() => {
+    if (syncSession?.access_token) {
+      return synchronize({ startup: true });
+    }
+    return null;
+  })
+  .catch((error) => {
+    showToast(error.message);
+  });
 
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
   navigator.serviceWorker.register("./service-worker.js").catch(() => {

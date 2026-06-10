@@ -1,4 +1,4 @@
-const CACHE_NAME = "today-todo-v2";
+const CACHE_NAME = "today-todo-v3";
 const APP_SHELL = [
   "./",
   "./index.html",

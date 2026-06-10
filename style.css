@@ -944,6 +944,12 @@ input::placeholder {
   font-size: 0.84rem;
 }
 
+.sync-detail {
+  margin: -8px 0 16px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
 .sync-setup {
   padding: 14px;
   border: 1px solid var(--line);
@@ -960,8 +966,33 @@ input::placeholder {
 
 .sync-auth-form[hidden],
 .sync-controls[hidden],
-.sync-setup[hidden] {
+.sync-setup[hidden],
+.sync-conflict[hidden],
+.sync-recovery[hidden] {
   display: none;
+}
+
+.sync-conflict,
+.sync-recovery {
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid var(--warning);
+  border-radius: 12px;
+  background: var(--paper-soft);
+}
+
+.sync-conflict h3,
+.sync-recovery h3 {
+  margin: 0 0 8px;
+  font-family: Georgia, "Yu Mincho", serif;
+  font-size: 1.05rem;
+}
+
+.sync-conflict p {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.6;
 }
 
 .sync-controls > p {
