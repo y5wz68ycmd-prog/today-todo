@@ -129,16 +129,20 @@ async function evaluate(client, expression) {
     await delay(500);
 
     await evaluate(client, `document.querySelector("#todo-form").requestSubmit()`);
+    const emptyInputMessage = await evaluate(
+      client,
+      `document.querySelector("#form-message").textContent`,
+    );
     assert(
-      (await evaluate(client, `document.querySelector("#form-message").textContent`))
-        .includes("入力してください"),
-      "空入力のエラーが表示されませんでした",
+      emptyInputMessage.includes("入力してください"),
+      `空入力のエラーが表示されませんでした: "${emptyInputMessage}"`,
     );
 
     await evaluate(
       client,
       `document.querySelector("#todo-input").value = "請求書を送る";
        document.querySelector("#due-date").value = "2020-01-01";
+       document.querySelector("#reminder-time").value = "09:00";
        document.querySelector("#priority").value = "high";
        document.querySelector("#category").value = "仕事";
        document.querySelector("#todo-form").requestSubmit();`,
@@ -163,6 +167,20 @@ async function evaluate(client, expression) {
         "high",
       "優先度が保存されませんでした",
     );
+    assert(
+      (await evaluate(
+        client,
+        `JSON.parse(localStorage.getItem("simple-todo-list"))[0].reminderTime`,
+      )) === "09:00",
+      "通知時刻が保存されませんでした",
+    );
+    assert(
+      (await evaluate(
+        client,
+        `document.querySelector(".reminder-badge").textContent`,
+      )).includes("09:00"),
+      "通知時刻が表示されませんでした",
+    );
 
     await evaluate(
       client,
@@ -181,6 +199,41 @@ async function evaluate(client, expression) {
        document.querySelector("#priority").value = "low";
        document.querySelector("#category").value = "買い物";
        document.querySelector("#todo-form").requestSubmit();`,
+    );
+
+    await evaluate(
+      client,
+      `document.querySelector("#sort-select").value = "manual";
+       document.querySelector("#sort-select").dispatchEvent(
+         new Event("change", { bubbles: true })
+       );`,
+    );
+    assert(
+      (await evaluate(
+        client,
+        `document.querySelector(".todo-item .todo-text").textContent`,
+      )) === "牛乳を買う",
+      "自由順で新しいタスクが先頭に表示されませんでした",
+    );
+    await evaluate(
+      client,
+      `document.querySelector(".todo-item .move-down-button").click()`,
+    );
+    assert(
+      (await evaluate(
+        client,
+        `document.querySelector(".todo-item .todo-text").textContent`,
+      )) === "請求書を送る",
+      "上下ボタンでタスクを並べ替えられませんでした",
+    );
+    assert(
+      (await evaluate(
+        client,
+        `JSON.parse(localStorage.getItem("simple-todo-list"))
+          .sort((a, b) => a.order - b.order)
+          .map((todo) => todo.text).join(",")`,
+      )) === "請求書を送る,牛乳を買う",
+      "自由な並び順が保存されませんでした",
     );
 
     await evaluate(
@@ -232,6 +285,8 @@ async function evaluate(client, expression) {
        document.querySelector("#edit-priority").value = "medium";
        document.querySelector("#edit-due-date").value = "2099-01-01";
        document.querySelector("#edit-repeat").value = "weekly";
+       document.querySelector("#edit-subtask-input").value = "食パンを選ぶ";
+       document.querySelector("#edit-subtask-add").click();
        document.querySelector("#edit-form").requestSubmit();`,
     );
     assert(
@@ -258,6 +313,35 @@ async function evaluate(client, expression) {
           .querySelector(".repeat-badge").textContent`,
       )).includes("毎週"),
       "繰り返し設定が表示されませんでした",
+    );
+    assert(
+      (await evaluate(
+        client,
+        `JSON.parse(localStorage.getItem("simple-todo-list"))
+          .find((todo) => todo.text === "牛乳とパンを買う").subtasks.length`,
+      )) === 1,
+      "サブタスクを追加できませんでした",
+    );
+    await evaluate(
+      client,
+      `Array.from(document.querySelectorAll(".todo-item"))
+        .find((item) => item.textContent.includes("牛乳とパンを買う"))
+        .querySelector(".subtask-toggle").click();`,
+    );
+    await evaluate(
+      client,
+      `Array.from(document.querySelectorAll(".todo-item"))
+        .find((item) => item.textContent.includes("牛乳とパンを買う"))
+        .querySelector(".subtask-item input").click();`,
+    );
+    assert(
+      await evaluate(
+        client,
+        `JSON.parse(localStorage.getItem("simple-todo-list"))
+          .find((todo) => todo.text === "牛乳とパンを買う")
+          .subtasks[0].completed`,
+      ),
+      "サブタスクを完了にできませんでした",
     );
 
     await evaluate(
@@ -290,6 +374,15 @@ async function evaluate(client, expression) {
       "繰り返しタスクが次回分の未完了状態に戻りませんでした",
     );
     assert(
+      !(await evaluate(
+        client,
+        `JSON.parse(localStorage.getItem("simple-todo-list"))
+          .find((todo) => todo.text === "牛乳とパンを買う")
+          .subtasks[0].completed`,
+      )),
+      "繰り返し後にサブタスクが未完了へ戻りませんでした",
+    );
+    assert(
       (await evaluate(
         client,
         `getNextDueDate({ dueDate: "2099-01-31", repeat: "monthly" })`,
@@ -311,6 +404,27 @@ async function evaluate(client, expression) {
         "dark",
       "ダークモードへ切り替えられませんでした",
     );
+
+    await evaluate(client, `document.querySelector("#sync-button").click()`);
+    assert(
+      await evaluate(client, `document.querySelector("#sync-dialog").open`),
+      "同期画面が開きませんでした",
+    );
+    assert(
+      (await evaluate(
+        client,
+        `document.querySelector("#sync-status").textContent`,
+      )).includes("まだありません"),
+      "同期未設定の案内が表示されませんでした",
+    );
+    assert(
+      await evaluate(
+        client,
+        `document.querySelector("#sync-auth-form").hidden`,
+      ),
+      "同期未設定時にログイン欄が表示されています",
+    );
+    await evaluate(client, `document.querySelector("#sync-close").click()`);
 
     await evaluate(
       client,
@@ -361,6 +475,13 @@ async function evaluate(client, expression) {
     assert(
       accessibilityIssues.unnamedButtons === 0,
       "名前のないボタンがあります",
+    );
+    assert(
+      (await evaluate(
+        client,
+        `document.querySelector('link[rel="manifest"]').getAttribute("href")`,
+      )) === "manifest.webmanifest",
+      "PWAマニフェストが参照されていません",
     );
 
     await client.send("Emulation.setDeviceMetricsOverride", {
@@ -452,9 +573,16 @@ async function evaluate(client, expression) {
       )) === "none",
       "旧バックアップの繰り返し設定を移行できませんでした",
     );
+    assert(
+      (await evaluate(
+        client,
+        `JSON.parse(localStorage.getItem("simple-todo-list"))[0].subtasks.length`,
+      )) === 0,
+      "旧バックアップのサブタスクを移行できませんでした",
+    );
 
     console.log(
-      "PASS: validation, add, due date, priority, category, repeat, search, sort, edit, history, theme, undo, persistence, accessibility, mobile layout, backup",
+      "PASS: validation, add, due date, reminder, priority, category, repeat, subtasks, manual order, search, sort, edit, history, theme, undo, persistence, accessibility, mobile layout, PWA, sync setup, backup",
     );
     await client.send("Browser.close");
   } finally {

@@ -1,7 +1,8 @@
 const STORAGE_KEY = "simple-todo-list";
 const HISTORY_KEY = `${STORAGE_KEY}-history`;
 const SETTINGS_KEY = `${STORAGE_KEY}-settings`;
-const BACKUP_VERSION = 3;
+const SYNC_SESSION_KEY = `${STORAGE_KEY}-sync-session`;
+const BACKUP_VERSION = 5;
 const PRIORITIES = new Set(["high", "medium", "low"]);
 const REPEATS = new Set(["none", "daily", "weekly", "monthly"]);
 const PRIORITY_LABELS = {
@@ -27,6 +28,7 @@ const elements = {
   dueDate: document.querySelector("#due-date"),
   priority: document.querySelector("#priority"),
   repeat: document.querySelector("#repeat"),
+  reminderTime: document.querySelector("#reminder-time"),
   category: document.querySelector("#category"),
   formMessage: document.querySelector("#form-message"),
   list: document.querySelector("#todo-list"),
@@ -34,18 +36,26 @@ const elements = {
   count: document.querySelector("#task-count"),
   emptyState: document.querySelector("#empty-state"),
   clearCompleted: document.querySelector("#clear-completed"),
+  syncButton: document.querySelector("#sync-button"),
+  notificationButton: document.querySelector("#notification-button"),
   filters: document.querySelectorAll(".filter"),
   search: document.querySelector("#search-input"),
   sort: document.querySelector("#sort-select"),
   themeToggle: document.querySelector("#theme-toggle"),
   themeIcon: document.querySelector("#theme-icon"),
+  installButton: document.querySelector("#install-button"),
   editDialog: document.querySelector("#edit-dialog"),
   editForm: document.querySelector("#edit-form"),
   editText: document.querySelector("#edit-text"),
   editDueDate: document.querySelector("#edit-due-date"),
   editPriority: document.querySelector("#edit-priority"),
   editRepeat: document.querySelector("#edit-repeat"),
+  editReminderTime: document.querySelector("#edit-reminder-time"),
   editCategory: document.querySelector("#edit-category"),
+  editSubtaskInput: document.querySelector("#edit-subtask-input"),
+  editSubtaskAdd: document.querySelector("#edit-subtask-add"),
+  editSubtaskList: document.querySelector("#edit-subtask-list"),
+  editSubtaskCount: document.querySelector("#subtask-editor-count"),
   editMessage: document.querySelector("#edit-message"),
   editClose: document.querySelector("#edit-close"),
   editCancel: document.querySelector("#edit-cancel"),
@@ -56,6 +66,21 @@ const elements = {
   historyClose: document.querySelector("#history-close"),
   historyDone: document.querySelector("#history-done"),
   clearHistory: document.querySelector("#clear-history"),
+  syncDialog: document.querySelector("#sync-dialog"),
+  syncClose: document.querySelector("#sync-close"),
+  syncDone: document.querySelector("#sync-done"),
+  syncStatus: document.querySelector("#sync-status"),
+  syncSetup: document.querySelector("#sync-setup"),
+  syncAuthForm: document.querySelector("#sync-auth-form"),
+  syncEmail: document.querySelector("#sync-email"),
+  syncPassword: document.querySelector("#sync-password"),
+  syncMessage: document.querySelector("#sync-message"),
+  syncSignup: document.querySelector("#sync-signup"),
+  syncControls: document.querySelector("#sync-controls"),
+  syncUserEmail: document.querySelector("#sync-user-email"),
+  syncUpload: document.querySelector("#sync-upload"),
+  syncDownload: document.querySelector("#sync-download"),
+  syncLogout: document.querySelector("#sync-logout"),
   exportButton: document.querySelector("#export-button"),
   importButton: document.querySelector("#import-button"),
   importInput: document.querySelector("#import-input"),
@@ -73,6 +98,17 @@ let currentSort = settings.sort;
 let editingId = null;
 let toastTimer = null;
 let undoAction = null;
+let draggedTodoId = null;
+let installPrompt = null;
+let editingSubtasks = [];
+const syncConfig = {
+  supabaseUrl: String(window.TODO_SYNC_CONFIG?.supabaseUrl ?? "")
+    .replace(/\/+$/, ""),
+  supabaseAnonKey: String(
+    window.TODO_SYNC_CONFIG?.supabaseAnonKey ?? "",
+  ),
+};
+let syncSession = loadSyncSession();
 
 document.querySelector("#today").textContent = new Intl.DateTimeFormat("ja-JP", {
   year: "numeric",
@@ -98,6 +134,31 @@ function parseStoredArray(key) {
   }
 }
 
+function loadSyncSession() {
+  try {
+    const session = JSON.parse(localStorage.getItem(SYNC_SESSION_KEY));
+    return session?.access_token && session?.user ? session : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSyncSession(session) {
+  syncSession = session;
+
+  if (session) {
+    localStorage.setItem(SYNC_SESSION_KEY, JSON.stringify(session));
+  } else {
+    localStorage.removeItem(SYNC_SESSION_KEY);
+  }
+
+  updateSyncUI();
+}
+
+function isSyncConfigured() {
+  return Boolean(syncConfig.supabaseUrl && syncConfig.supabaseAnonKey);
+}
+
 function normalizeText(value) {
   return String(value ?? "").trim().replace(/\s+/g, " ");
 }
@@ -105,6 +166,11 @@ function normalizeText(value) {
 function normalizeDate(value) {
   const date = String(value ?? "");
   return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "";
+}
+
+function normalizeReminderTime(value) {
+  const time = String(value ?? "");
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(time) ? time : "";
 }
 
 function normalizeCategory(value) {
@@ -130,6 +196,19 @@ function normalizeTodo(todo, index = 0) {
     dueDate: normalizeDate(todo?.dueDate),
     priority: PRIORITIES.has(todo?.priority) ? todo.priority : "medium",
     repeat: REPEATS.has(todo?.repeat) ? todo.repeat : "none",
+    reminderTime: normalizeReminderTime(todo?.reminderTime),
+    notifiedFor: typeof todo?.notifiedFor === "string"
+      ? todo.notifiedFor
+      : "",
+    subtasks: Array.isArray(todo?.subtasks)
+      ? todo.subtasks
+          .map((subtask) => ({
+            id: typeof subtask?.id === "string" ? subtask.id : createId(),
+            text: normalizeText(subtask?.text).slice(0, 80),
+            completed: Boolean(subtask?.completed),
+          }))
+          .filter((subtask) => subtask.text)
+      : [],
     category: normalizeCategory(todo?.category),
     completed,
     createdAt: normalizeTimestamp(todo?.createdAt, fallbackTime),
@@ -137,6 +216,7 @@ function normalizeTodo(todo, index = 0) {
     completedAt: completed
       ? normalizeTimestamp(todo?.completedAt, fallbackTime)
       : null,
+    order: Number.isFinite(todo?.order) ? todo.order : index,
   };
 }
 
@@ -170,7 +250,14 @@ function loadSettings() {
 
   try {
     const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY));
-    const validSorts = ["newest", "oldest", "due", "priority", "category"];
+    const validSorts = [
+      "manual",
+      "newest",
+      "oldest",
+      "due",
+      "priority",
+      "category",
+    ];
     return {
       theme: ["light", "dark"].includes(stored?.theme)
         ? stored.theme
@@ -288,11 +375,19 @@ function getVisibleTodos() {
       return true;
     }
 
-    const searchable = `${todo.text} ${todo.category}`.toLocaleLowerCase("ja");
+    const searchable = [
+      todo.text,
+      todo.category,
+      ...todo.subtasks.map((subtask) => subtask.text),
+    ].join(" ").toLocaleLowerCase("ja");
     return searchable.includes(searchQuery);
   });
 
   return filtered.sort((a, b) => {
+    if (currentSort === "manual") {
+      return a.order - b.order;
+    }
+
     if (currentSort === "oldest") {
       return a.createdAt - b.createdAt;
     }
@@ -325,6 +420,11 @@ function render() {
   elements.list.replaceChildren();
   const visibleTodos = getVisibleTodos();
   const fragment = document.createDocumentFragment();
+  const canReorder =
+    currentSort === "manual" &&
+    currentFilter === "all" &&
+    !searchQuery;
+  const orderedTodos = [...todos].sort((a, b) => a.order - b.order);
 
   visibleTodos.forEach((todo) => {
     const item = elements.template.content.firstElementChild.cloneNode(true);
@@ -334,6 +434,12 @@ function render() {
     const category = item.querySelector(".category-badge");
     const dueDate = item.querySelector(".todo-due-date");
     const repeat = item.querySelector(".repeat-badge");
+    const reminder = item.querySelector(".reminder-badge");
+    const subtaskToggle = item.querySelector(".subtask-toggle");
+    const subtaskList = item.querySelector(".subtask-list");
+    const dragHandle = item.querySelector(".drag-handle");
+    const moveUpButton = item.querySelector(".move-up-button");
+    const moveDownButton = item.querySelector(".move-down-button");
     const editButton = item.querySelector(".edit-button");
     const deleteButton = item.querySelector(".delete-button");
 
@@ -341,6 +447,8 @@ function render() {
     item.dataset.priority = todo.priority;
     item.classList.toggle("completed", todo.completed);
     item.classList.toggle("overdue", isOverdue(todo));
+    item.classList.toggle("reorder-enabled", canReorder);
+    item.draggable = canReorder;
 
     checkbox.checked = todo.completed;
     checkbox.setAttribute(
@@ -370,13 +478,111 @@ function render() {
         ? ""
         : `繰り返し: ${REPEAT_LABELS[todo.repeat]}`,
     );
+    reminder.textContent = todo.reminderTime
+      ? `通知 ${todo.reminderTime}`
+      : "";
+
+    if (todo.subtasks.length > 0) {
+      const completedSubtasks = todo.subtasks.filter(
+        (subtask) => subtask.completed,
+      ).length;
+      subtaskToggle.hidden = false;
+      subtaskToggle.textContent =
+        `サブタスク ${completedSubtasks}/${todo.subtasks.length} ▾`;
+      subtaskToggle.setAttribute("aria-expanded", "false");
+      subtaskToggle.setAttribute(
+        "aria-label",
+        `${todo.text}のサブタスクを表示`,
+      );
+
+      todo.subtasks.forEach((subtask) => {
+        const subtaskItem = document.createElement("li");
+        const subtaskLabel = document.createElement("label");
+        const subtaskCheckbox = document.createElement("input");
+        const subtaskText = document.createElement("span");
+
+        subtaskItem.className = "subtask-item";
+        subtaskItem.classList.toggle("completed", subtask.completed);
+        subtaskCheckbox.type = "checkbox";
+        subtaskCheckbox.checked = subtask.completed;
+        subtaskCheckbox.setAttribute(
+          "aria-label",
+          `${subtask.text}を${subtask.completed ? "未完了" : "完了"}にする`,
+        );
+        subtaskText.textContent = subtask.text;
+        subtaskCheckbox.addEventListener("change", () => {
+          toggleSubtask(todo.id, subtask.id);
+        });
+        subtaskLabel.append(subtaskCheckbox, subtaskText);
+        subtaskItem.append(subtaskLabel);
+        subtaskList.append(subtaskItem);
+      });
+
+      subtaskToggle.addEventListener("click", () => {
+        const expanded = subtaskToggle.getAttribute("aria-expanded") === "true";
+        subtaskToggle.setAttribute("aria-expanded", String(!expanded));
+        subtaskToggle.textContent =
+          `サブタスク ${completedSubtasks}/${todo.subtasks.length} ` +
+          `${expanded ? "▾" : "▴"}`;
+        subtaskList.hidden = expanded;
+      });
+    }
 
     editButton.setAttribute("aria-label", `${todo.text}を編集`);
     deleteButton.setAttribute("aria-label", `${todo.text}を削除`);
+    dragHandle.setAttribute(
+      "aria-label",
+      `${todo.text}をドラッグして並べ替える`,
+    );
+    moveUpButton.setAttribute("aria-label", `${todo.text}を上へ移動`);
+    moveDownButton.setAttribute("aria-label", `${todo.text}を下へ移動`);
+
+    const orderIndex = orderedTodos.findIndex((itemTodo) => itemTodo.id === todo.id);
+    moveUpButton.disabled = !canReorder || orderIndex <= 0;
+    moveDownButton.disabled =
+      !canReorder || orderIndex === orderedTodos.length - 1;
 
     checkbox.addEventListener("change", () => toggleTodo(todo.id));
+    moveUpButton.addEventListener("click", () => moveTodo(todo.id, -1));
+    moveDownButton.addEventListener("click", () => moveTodo(todo.id, 1));
     editButton.addEventListener("click", () => openEditDialog(todo.id));
     deleteButton.addEventListener("click", () => deleteTodo(todo.id));
+
+    item.addEventListener("dragstart", (event) => {
+      if (!canReorder) {
+        event.preventDefault();
+        return;
+      }
+
+      draggedTodoId = todo.id;
+      item.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", todo.id);
+    });
+    item.addEventListener("dragover", (event) => {
+      if (!draggedTodoId || draggedTodoId === todo.id) {
+        return;
+      }
+
+      event.preventDefault();
+      item.classList.add("drag-over");
+      event.dataTransfer.dropEffect = "move";
+    });
+    item.addEventListener("dragleave", () => {
+      item.classList.remove("drag-over");
+    });
+    item.addEventListener("drop", (event) => {
+      event.preventDefault();
+      item.classList.remove("drag-over");
+      reorderTodo(draggedTodoId, todo.id);
+    });
+    item.addEventListener("dragend", () => {
+      draggedTodoId = null;
+      item.classList.remove("dragging");
+      document
+        .querySelectorAll(".todo-item.drag-over")
+        .forEach((dragItem) => dragItem.classList.remove("drag-over"));
+    });
     fragment.append(item);
   });
 
@@ -437,22 +643,102 @@ function setFieldError(input, messageElement, message) {
   }
 }
 
-function addTodo(text, dueDate, priority, repeat, category) {
+function addTodo(
+  text,
+  dueDate,
+  priority,
+  repeat,
+  reminderTime,
+  category,
+) {
   const now = Date.now();
+  const firstOrder = todos.length
+    ? Math.min(...todos.map((todo) => todo.order)) - 1
+    : 0;
   todos.push({
     id: createId(),
     text,
     dueDate,
     priority,
     repeat,
+    reminderTime,
+    notifiedFor: "",
+    subtasks: [],
     category,
     completed: false,
     createdAt: now,
     updatedAt: now,
     completedAt: null,
+    order: firstOrder,
   });
   saveTodos();
   render();
+}
+
+function saveManualOrder(orderedTodos) {
+  const orderById = new Map(
+    orderedTodos.map((todo, index) => [todo.id, index]),
+  );
+  todos = todos.map((todo) => ({
+    ...todo,
+    order: orderById.get(todo.id) ?? todo.order,
+  }));
+  saveTodos();
+  render();
+}
+
+function toggleSubtask(todoId, subtaskId) {
+  todos = todos.map((todo) =>
+    todo.id === todoId
+      ? {
+          ...todo,
+          subtasks: todo.subtasks.map((subtask) =>
+            subtask.id === subtaskId
+              ? { ...subtask, completed: !subtask.completed }
+              : subtask,
+          ),
+          updatedAt: Date.now(),
+        }
+      : todo,
+  );
+  saveTodos();
+  render();
+}
+
+function moveTodo(id, direction) {
+  const orderedTodos = [...todos].sort((a, b) => a.order - b.order);
+  const currentIndex = orderedTodos.findIndex((todo) => todo.id === id);
+  const targetIndex = currentIndex + direction;
+
+  if (
+    currentIndex === -1 ||
+    targetIndex < 0 ||
+    targetIndex >= orderedTodos.length
+  ) {
+    return;
+  }
+
+  const [movedTodo] = orderedTodos.splice(currentIndex, 1);
+  orderedTodos.splice(targetIndex, 0, movedTodo);
+  saveManualOrder(orderedTodos);
+}
+
+function reorderTodo(draggedId, targetId) {
+  if (!draggedId || draggedId === targetId) {
+    return;
+  }
+
+  const orderedTodos = [...todos].sort((a, b) => a.order - b.order);
+  const draggedIndex = orderedTodos.findIndex((todo) => todo.id === draggedId);
+  const targetIndex = orderedTodos.findIndex((todo) => todo.id === targetId);
+
+  if (draggedIndex === -1 || targetIndex === -1) {
+    return;
+  }
+
+  const [movedTodo] = orderedTodos.splice(draggedIndex, 1);
+  orderedTodos.splice(targetIndex, 0, movedTodo);
+  saveManualOrder(orderedTodos);
 }
 
 function toggleTodo(id) {
@@ -486,6 +772,11 @@ function toggleTodo(id) {
           dueDate: nextDueDate,
           completed: false,
           completedAt: null,
+          notifiedFor: "",
+          subtasks: todo.subtasks.map((subtask) => ({
+            ...subtask,
+            completed: false,
+          })),
           updatedAt: now,
         };
       }
@@ -539,8 +830,11 @@ function openEditDialog(id) {
   elements.editDueDate.value = todo.dueDate;
   elements.editPriority.value = todo.priority;
   elements.editRepeat.value = todo.repeat;
+  elements.editReminderTime.value = todo.reminderTime;
   elements.editCategory.value =
     todo.category === "未分類" ? "" : todo.category;
+  editingSubtasks = todo.subtasks.map((subtask) => ({ ...subtask }));
+  renderEditSubtasks();
   elements.editMessage.textContent = "";
   elements.editText.removeAttribute("aria-invalid");
   elements.editDialog.showModal();
@@ -550,7 +844,73 @@ function openEditDialog(id) {
 
 function closeEditDialog() {
   editingId = null;
+  editingSubtasks = [];
   elements.editDialog.close();
+}
+
+function renderEditSubtasks() {
+  elements.editSubtaskList.replaceChildren();
+  elements.editSubtaskCount.textContent = `${editingSubtasks.length}件`;
+  const fragment = document.createDocumentFragment();
+
+  editingSubtasks.forEach((subtask) => {
+    const item = document.createElement("li");
+    const checkbox = document.createElement("input");
+    const text = document.createElement("span");
+    const removeButton = document.createElement("button");
+
+    item.className = "edit-subtask-item";
+    item.classList.toggle("completed", subtask.completed);
+    checkbox.type = "checkbox";
+    checkbox.checked = subtask.completed;
+    checkbox.setAttribute(
+      "aria-label",
+      `${subtask.text}を${subtask.completed ? "未完了" : "完了"}にする`,
+    );
+    text.textContent = subtask.text;
+    removeButton.className = "edit-subtask-remove";
+    removeButton.type = "button";
+    removeButton.textContent = "×";
+    removeButton.setAttribute("aria-label", `${subtask.text}を削除`);
+
+    checkbox.addEventListener("change", () => {
+      editingSubtasks = editingSubtasks.map((itemSubtask) =>
+        itemSubtask.id === subtask.id
+          ? { ...itemSubtask, completed: !itemSubtask.completed }
+          : itemSubtask,
+      );
+      renderEditSubtasks();
+    });
+    removeButton.addEventListener("click", () => {
+      editingSubtasks = editingSubtasks.filter(
+        (itemSubtask) => itemSubtask.id !== subtask.id,
+      );
+      renderEditSubtasks();
+    });
+
+    item.append(checkbox, text, removeButton);
+    fragment.append(item);
+  });
+
+  elements.editSubtaskList.append(fragment);
+}
+
+function addEditingSubtask() {
+  const text = normalizeText(elements.editSubtaskInput.value).slice(0, 80);
+
+  if (!text) {
+    elements.editSubtaskInput.focus();
+    return;
+  }
+
+  editingSubtasks.push({
+    id: createId(),
+    text,
+    completed: false,
+  });
+  elements.editSubtaskInput.value = "";
+  renderEditSubtasks();
+  elements.editSubtaskInput.focus();
 }
 
 function renderHistory() {
@@ -613,6 +973,316 @@ function showToast(message, action = null) {
   }, 5000);
 }
 
+async function syncRequest(path, options = {}) {
+  if (!isSyncConfigured()) {
+    throw new Error("同期設定がありません。");
+  }
+
+  const headers = {
+    apikey: syncConfig.supabaseAnonKey,
+    "Content-Type": "application/json",
+    ...options.headers,
+  };
+
+  if (syncSession?.access_token) {
+    headers.Authorization = `Bearer ${syncSession.access_token}`;
+  }
+
+  const response = await fetch(`${syncConfig.supabaseUrl}${path}`, {
+    ...options,
+    headers,
+  });
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : null;
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      saveSyncSession(null);
+    }
+
+    throw new Error(
+      data?.msg ||
+        data?.message ||
+        data?.error_description ||
+        "クラウドとの通信に失敗しました。",
+    );
+  }
+
+  return data;
+}
+
+function updateSyncUI() {
+  const configured = isSyncConfigured();
+  const loggedIn = configured && Boolean(syncSession?.access_token);
+
+  elements.syncSetup.hidden = configured;
+  elements.syncAuthForm.hidden = !configured || loggedIn;
+  elements.syncControls.hidden = !loggedIn;
+  elements.syncButton.textContent = loggedIn ? "同期済み端末" : "端末間同期";
+  elements.syncStatus.textContent = !configured
+    ? "同期設定がまだありません。"
+    : loggedIn
+      ? "クラウドへ保存、または別端末のデータを復元できます。"
+      : "アカウントへログインしてください。";
+  elements.syncUserEmail.textContent = syncSession?.user?.email || "";
+}
+
+async function authenticateSync(mode) {
+  const email = normalizeText(elements.syncEmail.value);
+  const password = elements.syncPassword.value;
+
+  if (!email || password.length < 8) {
+    elements.syncMessage.textContent =
+      "メールアドレスと8文字以上のパスワードを入力してください。";
+    return;
+  }
+
+  elements.syncMessage.textContent = "";
+
+  try {
+    const path = mode === "signup"
+      ? "/auth/v1/signup"
+      : "/auth/v1/token?grant_type=password";
+    const data = await syncRequest(path, {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    });
+    const session = data.session || data;
+
+    if (!session?.access_token) {
+      elements.syncMessage.textContent =
+        "確認メールを送信しました。メール確認後にログインしてください。";
+      return;
+    }
+
+    saveSyncSession(session);
+    elements.syncPassword.value = "";
+    showToast("クラウド同期へログインしました。");
+  } catch (error) {
+    elements.syncMessage.textContent = error.message;
+  }
+}
+
+function getSyncPayload() {
+  return {
+    version: BACKUP_VERSION,
+    todos,
+    history,
+    settings,
+  };
+}
+
+async function uploadSyncData() {
+  try {
+    await syncRequest("/rest/v1/todo_sync?on_conflict=user_id", {
+      method: "POST",
+      headers: {
+        Prefer: "resolution=merge-duplicates,return=minimal",
+      },
+      body: JSON.stringify({
+        user_id: syncSession.user.id,
+        payload: getSyncPayload(),
+        updated_at: new Date().toISOString(),
+      }),
+    });
+    showToast("クラウドへ保存しました。");
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function normalizeImportedHistory(entries) {
+  return Array.isArray(entries)
+    ? entries
+        .map((entry, index) => ({
+          id: typeof entry?.id === "string" ? entry.id : createId(),
+          todoId: typeof entry?.todoId === "string" ? entry.todoId : "",
+          text: normalizeText(entry?.text).slice(0, 100),
+          completedAt: normalizeTimestamp(
+            entry?.completedAt,
+            Date.now() - index,
+          ),
+        }))
+        .filter((entry) => entry.text)
+    : [];
+}
+
+function applySyncedPayload(payload) {
+  todos = Array.isArray(payload?.todos)
+    ? payload.todos.map(normalizeTodo).filter((todo) => todo.text)
+    : [];
+  history = normalizeImportedHistory(payload?.history);
+
+  if (payload?.settings) {
+    settings = {
+      ...settings,
+      theme: ["light", "dark"].includes(payload.settings.theme)
+        ? payload.settings.theme
+        : settings.theme,
+      sort: [
+        "manual",
+        "newest",
+        "oldest",
+        "due",
+        "priority",
+        "category",
+      ].includes(payload.settings.sort)
+        ? payload.settings.sort
+        : settings.sort,
+    };
+  }
+
+  currentSort = settings.sort;
+  elements.sort.value = currentSort;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  saveSettings();
+  setTheme(settings.theme);
+  render();
+}
+
+async function downloadSyncData() {
+  try {
+    const rows = await syncRequest(
+      `/rest/v1/todo_sync?user_id=eq.${encodeURIComponent(
+        syncSession.user.id,
+      )}&select=payload,updated_at`,
+    );
+    const row = rows?.[0];
+
+    if (!row?.payload) {
+      showToast("クラウドに保存されたデータはありません。");
+      return;
+    }
+
+    if (
+      !window.confirm(
+        "現在の端末データをクラウドの内容で置き換えますか？",
+      )
+    ) {
+      return;
+    }
+
+    applySyncedPayload(row.payload);
+    showToast("クラウドから復元しました。");
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function openSyncDialog() {
+  updateSyncUI();
+  elements.syncMessage.textContent = "";
+  elements.syncDialog.showModal();
+  elements.syncClose.focus();
+}
+
+function closeSyncDialog() {
+  elements.syncDialog.close();
+}
+
+function updateNotificationButton() {
+  if (!("Notification" in window)) {
+    elements.notificationButton.hidden = true;
+    return;
+  }
+
+  elements.notificationButton.hidden = false;
+  elements.notificationButton.textContent =
+    Notification.permission === "granted"
+      ? "通知は有効"
+      : "通知を有効化";
+  elements.notificationButton.disabled =
+    Notification.permission === "granted";
+}
+
+async function requestNotifications() {
+  if (location.protocol === "file:") {
+    showToast("通知は公開版のアプリから有効にできます。");
+    return;
+  }
+
+  if (!("Notification" in window)) {
+    showToast("このブラウザは通知に対応していません。");
+    return;
+  }
+
+  const permission = await Notification.requestPermission();
+  updateNotificationButton();
+  showToast(
+    permission === "granted"
+      ? "期限通知を有効にしました。"
+      : "通知は許可されませんでした。",
+  );
+
+  if (permission === "granted") {
+    checkReminders();
+  }
+}
+
+async function showReminderNotification(todo) {
+  const options = {
+    body: todo.dueDate === getLocalDateString()
+      ? `今日 ${todo.reminderTime} の予定です。`
+      : `${formatDueDate(todo)}の予定です。`,
+    icon: "./icon.svg",
+    badge: "./icon.svg",
+    tag: `todo-${todo.id}-${todo.dueDate}-${todo.reminderTime}`,
+    data: { todoId: todo.id },
+  };
+
+  if ("serviceWorker" in navigator) {
+    const registration = await navigator.serviceWorker.ready;
+    await registration.showNotification(todo.text, options);
+  } else {
+    new Notification(todo.text, options);
+  }
+}
+
+async function checkReminders() {
+  if (
+    !("Notification" in window) ||
+    Notification.permission !== "granted"
+  ) {
+    return;
+  }
+
+  const now = Date.now();
+  const dueTodos = todos.filter((todo) => {
+    if (todo.completed || !todo.dueDate || !todo.reminderTime) {
+      return false;
+    }
+
+    const notificationKey = `${todo.dueDate}T${todo.reminderTime}`;
+    const scheduledAt = new Date(notificationKey).getTime();
+    const elapsed = now - scheduledAt;
+    return (
+      todo.notifiedFor !== notificationKey &&
+      elapsed >= 0 &&
+      elapsed < 24 * 60 * 60 * 1000
+    );
+  });
+
+  for (const todo of dueTodos) {
+    const notificationKey = `${todo.dueDate}T${todo.reminderTime}`;
+
+    try {
+      await showReminderNotification(todo);
+      todos = todos.map((item) =>
+        item.id === todo.id
+          ? { ...item, notifiedFor: notificationKey }
+          : item,
+      );
+    } catch {
+      return;
+    }
+  }
+
+  if (dueTodos.length > 0) {
+    saveTodos();
+  }
+}
+
 function exportBackup() {
   const backup = {
     app: "今日のToDo",
@@ -664,9 +1334,14 @@ async function importBackup(file) {
       theme: ["light", "dark"].includes(data.settings?.theme)
         ? data.settings.theme
         : settings.theme,
-      sort: ["newest", "oldest", "due", "priority", "category"].includes(
-        data.settings?.sort,
-      )
+      sort: [
+        "manual",
+        "newest",
+        "oldest",
+        "due",
+        "priority",
+        "category",
+      ].includes(data.settings?.sort)
         ? data.settings.sort
         : settings.sort,
     };
@@ -699,9 +1374,20 @@ elements.form.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = normalizeText(elements.input.value);
   const message = validateTask(text);
+  const reminderTime = normalizeReminderTime(elements.reminderTime.value);
 
   if (message) {
     setFieldError(elements.input, elements.formMessage, message);
+    return;
+  }
+
+  if (reminderTime && !elements.dueDate.value) {
+    setFieldError(
+      elements.input,
+      elements.formMessage,
+      "通知時刻を設定する場合は期限も選んでください。",
+    );
+    elements.dueDate.focus();
     return;
   }
 
@@ -712,6 +1398,7 @@ elements.form.addEventListener("submit", (event) => {
       ? elements.priority.value
       : "medium",
     REPEATS.has(elements.repeat.value) ? elements.repeat.value : "none",
+    reminderTime,
     normalizeCategory(elements.category.value),
   );
   elements.form.reset();
@@ -731,9 +1418,20 @@ elements.editForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = normalizeText(elements.editText.value);
   const message = validateTask(text, editingId);
+  const reminderTime = normalizeReminderTime(elements.editReminderTime.value);
 
   if (message) {
     setFieldError(elements.editText, elements.editMessage, message);
+    return;
+  }
+
+  if (reminderTime && !elements.editDueDate.value) {
+    setFieldError(
+      elements.editText,
+      elements.editMessage,
+      "通知時刻を設定する場合は期限も選んでください。",
+    );
+    elements.editDueDate.focus();
     return;
   }
 
@@ -749,7 +1447,14 @@ elements.editForm.addEventListener("submit", (event) => {
           repeat: REPEATS.has(elements.editRepeat.value)
             ? elements.editRepeat.value
             : "none",
+          reminderTime,
+          notifiedFor:
+            todo.dueDate === normalizeDate(elements.editDueDate.value) &&
+            todo.reminderTime === reminderTime
+              ? todo.notifiedFor
+              : "",
           category: normalizeCategory(elements.editCategory.value),
+          subtasks: editingSubtasks.map((subtask) => ({ ...subtask })),
           updatedAt: Date.now(),
         }
       : todo,
@@ -763,6 +1468,14 @@ elements.editForm.addEventListener("submit", (event) => {
 elements.editText.addEventListener("input", () => {
   if (elements.editMessage.textContent) {
     setFieldError(elements.editText, elements.editMessage, "");
+  }
+});
+
+elements.editSubtaskAdd.addEventListener("click", addEditingSubtask);
+elements.editSubtaskInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    addEditingSubtask();
   }
 });
 
@@ -812,6 +1525,34 @@ elements.themeToggle.addEventListener("click", () => {
   setTheme(settings.theme === "dark" ? "light" : "dark");
 });
 
+elements.notificationButton.addEventListener("click", requestNotifications);
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  installPrompt = event;
+  elements.installButton.hidden = false;
+});
+
+elements.installButton.addEventListener("click", async () => {
+  if (!installPrompt) {
+    return;
+  }
+
+  installPrompt.prompt();
+  const choice = await installPrompt.userChoice;
+  installPrompt = null;
+  elements.installButton.hidden = true;
+
+  if (choice.outcome === "accepted") {
+    showToast("アプリをホーム画面へ追加しました。");
+  }
+});
+
+window.addEventListener("appinstalled", () => {
+  installPrompt = null;
+  elements.installButton.hidden = true;
+});
+
 elements.historyButton.addEventListener("click", openHistoryDialog);
 elements.historyClose.addEventListener("click", closeHistoryDialog);
 elements.historyDone.addEventListener("click", closeHistoryDialog);
@@ -823,6 +1564,28 @@ elements.clearHistory.addEventListener("click", () => {
     render();
     showToast("完了履歴を消去しました。");
   }
+});
+
+elements.syncButton.addEventListener("click", openSyncDialog);
+elements.syncClose.addEventListener("click", closeSyncDialog);
+elements.syncDone.addEventListener("click", closeSyncDialog);
+elements.syncAuthForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  authenticateSync("login");
+});
+elements.syncSignup.addEventListener("click", () => {
+  authenticateSync("signup");
+});
+elements.syncUpload.addEventListener("click", uploadSyncData);
+elements.syncDownload.addEventListener("click", downloadSyncData);
+elements.syncLogout.addEventListener("click", async () => {
+  try {
+    await syncRequest("/auth/v1/logout", { method: "POST" });
+  } catch {
+    // Clear the local session even if the remote session already expired.
+  }
+  saveSyncSession(null);
+  showToast("クラウド同期からログアウトしました。");
 });
 
 elements.exportButton.addEventListener("click", exportBackup);
@@ -846,3 +1609,13 @@ elements.toastAction.addEventListener("click", () => {
 
 setTheme(settings.theme);
 render();
+updateSyncUI();
+updateNotificationButton();
+checkReminders();
+setInterval(checkReminders, 30 * 1000);
+
+if ("serviceWorker" in navigator && location.protocol !== "file:") {
+  navigator.serviceWorker.register("./service-worker.js").catch(() => {
+    // The app remains fully usable online if registration is unavailable.
+  });
+}

@@ -9,6 +9,9 @@
   >
   <meta name="theme-color" content="#edf0e8">
   <title>今日のToDo</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -21,15 +24,25 @@
         <h1>今日のToDo</h1>
         <p class="date" id="today"></p>
       </div>
-      <button
-        class="icon-button theme-button"
-        id="theme-toggle"
-        type="button"
-        aria-label="ダークモードに切り替える"
-        title="テーマを切り替える"
-      >
-        <span aria-hidden="true" id="theme-icon">☾</span>
-      </button>
+      <div class="header-actions">
+        <button
+          class="install-button"
+          id="install-button"
+          type="button"
+          hidden
+        >
+          アプリを追加
+        </button>
+        <button
+          class="icon-button theme-button"
+          id="theme-toggle"
+          type="button"
+          aria-label="ダークモードに切り替える"
+          title="テーマを切り替える"
+        >
+          <span aria-hidden="true" id="theme-icon">☾</span>
+        </button>
+      </div>
     </header>
 
     <section class="composer-card" aria-labelledby="add-task-title">
@@ -74,6 +87,11 @@
             </select>
           </label>
 
+          <label class="option-field">
+            <span>通知</span>
+            <input id="reminder-time" type="time" aria-label="通知時刻">
+          </label>
+
           <label class="option-field category-field">
             <span>カテゴリー</span>
             <input
@@ -107,6 +125,7 @@
         <label class="sort-field">
           <span>並べ替え</span>
           <select id="sort-select">
+            <option value="manual">自由な順番</option>
             <option value="newest">新しい順</option>
             <option value="oldest">古い順</option>
             <option value="due">期限が近い順</option>
@@ -119,6 +138,12 @@
       <div class="summary">
         <p id="task-count" aria-live="polite">タスクはありません</p>
         <div class="summary-actions">
+          <button class="text-button" id="sync-button" type="button">
+            端末間同期
+          </button>
+          <button class="text-button" id="notification-button" type="button">
+            通知を有効化
+          </button>
           <button class="text-button" id="history-button" type="button">
             完了履歴
           </button>
@@ -200,6 +225,15 @@
 
   <template id="todo-template">
     <li class="todo-item">
+      <button
+        class="drag-handle"
+        type="button"
+        aria-label="ドラッグして並べ替える"
+        title="ドラッグして並べ替える"
+      >
+        ⋮⋮
+      </button>
+
       <label class="todo-check-control">
         <input class="todo-checkbox" type="checkbox">
         <span class="custom-checkbox" aria-hidden="true"></span>
@@ -214,10 +248,34 @@
           <span class="category-badge"></span>
           <time class="todo-due-date"></time>
           <span class="repeat-badge"></span>
+          <span class="reminder-badge"></span>
         </div>
+        <button
+          class="subtask-toggle"
+          type="button"
+          aria-label="サブタスクを表示"
+          hidden
+        ></button>
+        <ul class="subtask-list" hidden></ul>
       </div>
 
       <div class="todo-actions">
+        <button
+          class="action-button move-button move-up-button"
+          type="button"
+          aria-label="上へ移動"
+          title="上へ移動"
+        >
+          ↑
+        </button>
+        <button
+          class="action-button move-button move-down-button"
+          type="button"
+          aria-label="下へ移動"
+          title="下へ移動"
+        >
+          ↓
+        </button>
         <button class="action-button edit-button" type="button">編集</button>
         <button
           class="action-button delete-button"
@@ -277,6 +335,11 @@
             <option value="monthly">毎月</option>
           </select>
         </label>
+
+        <label class="dialog-field">
+          <span>通知時刻</span>
+          <input id="edit-reminder-time" type="time">
+        </label>
       </div>
 
       <label class="dialog-field">
@@ -289,6 +352,30 @@
           placeholder="未分類"
         >
       </label>
+
+      <section class="subtask-editor" aria-labelledby="subtask-editor-title">
+        <div class="subtask-editor-header">
+          <span id="subtask-editor-title">サブタスク</span>
+          <span id="subtask-editor-count">0件</span>
+        </div>
+        <div class="subtask-add-row">
+          <label class="sr-only" for="edit-subtask-input">サブタスクを追加</label>
+          <input
+            id="edit-subtask-input"
+            type="text"
+            maxlength="80"
+            placeholder="小さな作業を入力..."
+          >
+          <button
+            class="secondary-button"
+            id="edit-subtask-add"
+            type="button"
+          >
+            追加
+          </button>
+        </div>
+        <ul class="edit-subtask-list" id="edit-subtask-list"></ul>
+      </section>
 
       <p class="form-message" id="edit-message" role="alert"></p>
 
@@ -334,11 +421,86 @@
     </section>
   </dialog>
 
+  <dialog class="app-dialog" id="sync-dialog" aria-labelledby="sync-title">
+    <section class="sync-panel">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">CLOUD SYNC</p>
+          <h2 id="sync-title">ログインと端末間同期</h2>
+        </div>
+        <button
+          class="icon-button"
+          id="sync-close"
+          type="button"
+          aria-label="同期画面を閉じる"
+        >
+          ×
+        </button>
+      </div>
+
+      <p class="sync-status" id="sync-status" role="status"></p>
+
+      <div class="sync-setup" id="sync-setup">
+        <p>
+          同期機能を利用するには、Supabaseの接続設定が必要です。
+          詳しい手順は <code>SYNC_SETUP.md</code> にあります。
+        </p>
+      </div>
+
+      <form class="sync-auth-form" id="sync-auth-form" novalidate>
+        <label class="dialog-field">
+          <span>メールアドレス</span>
+          <input id="sync-email" type="email" autocomplete="email" required>
+        </label>
+        <label class="dialog-field">
+          <span>パスワード</span>
+          <input
+            id="sync-password"
+            type="password"
+            minlength="8"
+            autocomplete="current-password"
+            required
+          >
+        </label>
+        <p class="form-message" id="sync-message" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="secondary-button" id="sync-signup" type="button">
+            アカウント作成
+          </button>
+          <button class="primary-button" type="submit">ログイン</button>
+        </div>
+      </form>
+
+      <div class="sync-controls" id="sync-controls" hidden>
+        <p>
+          ログイン中: <strong id="sync-user-email"></strong>
+        </p>
+        <div class="sync-action-grid">
+          <button class="primary-button" id="sync-upload" type="button">
+            クラウドへ保存
+          </button>
+          <button class="secondary-button" id="sync-download" type="button">
+            クラウドから復元
+          </button>
+        </div>
+        <div class="dialog-actions">
+          <button class="text-button danger-text" id="sync-logout" type="button">
+            ログアウト
+          </button>
+          <button class="secondary-button" id="sync-done" type="button">
+            閉じる
+          </button>
+        </div>
+      </div>
+    </section>
+  </dialog>
+
   <div class="toast" id="toast" role="status" aria-live="polite">
     <span id="toast-message"></span>
     <button id="toast-action" type="button" hidden>元に戻す</button>
   </div>
 
+  <script src="sync-config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
