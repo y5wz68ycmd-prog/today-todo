@@ -414,15 +414,15 @@ async function evaluate(client, expression) {
       (await evaluate(
         client,
         `document.querySelector("#sync-status").textContent`,
-      )).includes("まだありません"),
-      "同期未設定の案内が表示されませんでした",
+      )).includes("ログイン"),
+      "同期設定後のログイン案内が表示されませんでした",
     );
     assert(
-      await evaluate(
+      !(await evaluate(
         client,
         `document.querySelector("#sync-auth-form").hidden`,
-      ),
-      "同期未設定時にログイン欄が表示されています",
+      )),
+      "同期設定後にログイン欄が表示されませんでした",
     );
     await evaluate(client, `document.querySelector("#sync-close").click()`);
 
@@ -582,7 +582,7 @@ async function evaluate(client, expression) {
     );
 
     console.log(
-      "PASS: validation, add, due date, reminder, priority, category, repeat, subtasks, manual order, search, sort, edit, history, theme, undo, persistence, accessibility, mobile layout, PWA, sync setup, backup",
+      "PASS: validation, add, due date, reminder, priority, category, repeat, subtasks, manual order, search, sort, edit, history, theme, undo, persistence, accessibility, mobile layout, PWA, sync config, backup",
     );
     await client.send("Browser.close");
   } finally {
