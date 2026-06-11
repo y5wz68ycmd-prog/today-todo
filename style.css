@@ -1226,6 +1226,11 @@ input::placeholder {
   .sync-action-grid {
     grid-template-columns: 1fr;
   }
+
+  #sync-title {
+    font-size: 1.45rem;
+    white-space: nowrap;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
