@@ -92,6 +92,8 @@ const elements = {
   syncUpload: document.querySelector("#sync-upload"),
   syncDownload: document.querySelector("#sync-download"),
   syncLogout: document.querySelector("#sync-logout"),
+  syncDeleteAccount: document.querySelector("#sync-delete-account"),
+  syncDeleteMessage: document.querySelector("#sync-delete-message"),
   exportButton: document.querySelector("#export-button"),
   importButton: document.querySelector("#import-button"),
   importInput: document.querySelector("#import-input"),
@@ -1667,9 +1669,54 @@ async function updatePassword() {
   }
 }
 
+async function deleteSyncAccount() {
+  if (!syncSession?.access_token) {
+    return;
+  }
+
+  const confirmed = window.confirm(
+    "アカウントとクラウド上のタスクを完全に削除します。" +
+      "この操作は取り消せません。続けますか？",
+  );
+
+  if (!confirmed) {
+    return;
+  }
+
+  elements.syncDeleteAccount.disabled = true;
+  elements.syncDeleteMessage.textContent = "アカウントを削除しています...";
+
+  try {
+    await syncRequest("/functions/v1/delete-account", {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+    });
+
+    clearTimeout(autoSyncTimer);
+    pendingCloudRow = null;
+    syncMeta.accountId = "";
+    syncMeta.lastSyncedRevision = 0;
+    syncMeta.lastCloudUpdatedAt = "";
+    syncMeta.pending = false;
+    syncMeta.conflict = false;
+    saveSyncMeta();
+    saveSyncSession(null);
+    elements.syncDeleteMessage.textContent = "";
+    closeSyncDialog();
+    showToast(
+      "アカウントとクラウドデータを削除しました。端末内のタスクは残っています。",
+    );
+  } catch (error) {
+    elements.syncDeleteMessage.textContent = error.message;
+  } finally {
+    elements.syncDeleteAccount.disabled = false;
+  }
+}
+
 function openSyncDialog() {
   updateSyncUI();
   elements.syncMessage.textContent = "";
+  elements.syncDeleteMessage.textContent = "";
   elements.syncDialog.showModal();
   elements.syncClose.focus();
 }
@@ -2099,6 +2146,7 @@ elements.syncUseCloud.addEventListener("click", async () => {
   }
 });
 elements.syncUpdatePassword.addEventListener("click", updatePassword);
+elements.syncDeleteAccount.addEventListener("click", deleteSyncAccount);
 elements.syncLogout.addEventListener("click", async () => {
   try {
     await syncRequest("/auth/v1/logout", { method: "POST" });
@@ -2156,6 +2204,12 @@ document.addEventListener("visibilitychange", () => {
     synchronize({ startup: true });
   }
 });
+
+if (
+  new URLSearchParams(location.search).get("open") === "account-deletion"
+) {
+  openSyncDialog();
+}
 
 handleAuthRedirect()
   .then(() => {

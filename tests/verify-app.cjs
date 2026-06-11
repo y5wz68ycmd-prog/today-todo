@@ -1,4 +1,5 @@
 const { spawn } = require("child_process");
+const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { pathToFileURL } = require("url");
@@ -425,6 +426,15 @@ async function evaluate(client, expression) {
       "同期設定後にログイン欄が表示されませんでした",
     );
     assert(
+      (await evaluate(
+        client,
+        `Array.from(document.querySelectorAll(".app-footer a"))
+          .map((link) => link.getAttribute("href")).join(",")`,
+      )) ===
+        "privacy.html,terms.html,support.html,account-deletion.html",
+      "販売に必要な公開ページへのリンクが表示されませんでした",
+    );
+    assert(
       await evaluate(
         client,
         `JSON.parse(localStorage.getItem("simple-todo-list-sync-meta")).pending`,
@@ -710,8 +720,122 @@ async function evaluate(client, expression) {
       "競合時にクラウド側の内容を採用できませんでした",
     );
 
+    const accountDeletion = await evaluate(
+      client,
+      `(async () => {
+        const originalFetch = window.fetch;
+        const originalConfirm = window.confirm;
+        let deletionCalls = 0;
+        const localTaskCountBefore = JSON.parse(
+          localStorage.getItem("simple-todo-list")
+        ).length;
+
+        window.confirm = () => true;
+        window.fetch = async (url) => {
+          if (String(url).includes("/functions/v1/delete-account")) {
+            deletionCalls += 1;
+            return new Response(JSON.stringify({ deleted: true }), {
+              status: 200
+            });
+          }
+          return new Response(JSON.stringify({}), { status: 200 });
+        };
+        syncSession = {
+          access_token: "delete-token",
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          user: { id: "delete-user", email: "delete@example.com" }
+        };
+        updateSyncUI();
+
+        await deleteSyncAccount();
+        const result = {
+          deletionCalls,
+          loggedOut: syncSession === null,
+          accountIdCleared: syncMeta.accountId === "",
+          localTaskCountAfter: JSON.parse(
+            localStorage.getItem("simple-todo-list")
+          ).length,
+          localTaskCountBefore,
+          toast: document.querySelector("#toast-message").textContent
+        };
+        window.fetch = originalFetch;
+        window.confirm = originalConfirm;
+        return result;
+      })()`,
+    );
+    assert(
+      accountDeletion.deletionCalls === 1 &&
+        accountDeletion.loggedOut &&
+        accountDeletion.accountIdCleared,
+      "アカウント削除後に同期アカウントを解除できませんでした",
+    );
+    assert(
+      accountDeletion.localTaskCountAfter ===
+        accountDeletion.localTaskCountBefore &&
+        accountDeletion.toast.includes("端末内のタスクは残っています"),
+      "アカウント削除時に端末内タスクを安全に保持できませんでした",
+    );
+
+    const publicPages = [
+      ["privacy.html", "プライバシーポリシー"],
+      ["terms.html", "利用規約"],
+      ["support.html", "サポート"],
+      ["account-deletion.html", "アカウント削除"],
+    ];
+    publicPages.forEach(([filename, expectedText]) => {
+      const content = fs.readFileSync(
+        path.resolve(__dirname, `../${filename}`),
+        "utf8",
+      );
+      assert(
+        content.includes(expectedText),
+        `${filename}に必要な内容がありません`,
+      );
+    });
+    const deleteFunction = fs.readFileSync(
+      path.resolve(
+        __dirname,
+        "../supabase/functions/delete-account/index.ts",
+      ),
+      "utf8",
+    );
+    assert(
+      deleteFunction.includes("auth.admin.deleteUser") &&
+        deleteFunction.includes("SUPABASE_SERVICE_ROLE_KEY"),
+      "安全なサーバー側アカウント削除処理がありません",
+    );
+
+    for (const [filename, expectedText] of publicPages) {
+      const pageUrl = pathToFileURL(
+        path.resolve(__dirname, `../${filename}`),
+      ).href;
+      await client.send("Page.navigate", { url: pageUrl });
+      await delay(150);
+      const pageState = await evaluate(
+        client,
+        `({
+          heading: document.querySelector("h1")?.textContent || "",
+          fitsViewport:
+            document.documentElement.scrollWidth <= window.innerWidth
+        })`,
+      );
+      assert(
+        pageState.heading.includes(expectedText) && pageState.fitsViewport,
+        `${filename}をスマートフォン幅で正しく表示できませんでした`,
+      );
+    }
+
+    await client.send("Page.navigate", {
+      url: `${appUrl}?open=account-deletion`,
+    });
+    await delay(250);
+    assert(
+      await evaluate(client, `document.querySelector("#sync-dialog").open`),
+      "公開削除ページからアカウント削除画面を開けませんでした",
+    );
+
     console.log(
-      "PASS: validation, add, due date, reminder, priority, category, repeat, subtasks, manual order, search, sort, edit, history, theme, undo, persistence, accessibility, mobile layout, PWA, auto sync, conflict handling, session refresh, password reset, backup",
+      "PASS: validation, tasks, repeat, subtasks, history, theme, persistence, accessibility, mobile, PWA, cloud sync, session refresh, password reset, account deletion, privacy pages, backup",
     );
     await client.send("Browser.close");
   } finally {

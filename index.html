@@ -215,6 +215,16 @@
     </section>
   </main>
 
+  <footer class="app-footer">
+    <nav aria-label="サービス情報">
+      <a href="privacy.html">プライバシー</a>
+      <a href="terms.html">利用規約</a>
+      <a href="support.html">サポート</a>
+      <a href="account-deletion.html">アカウント削除</a>
+    </nav>
+    <p>今日のToDo</p>
+  </footer>
+
   <datalist id="category-suggestions">
     <option value="仕事"></option>
     <option value="個人"></option>
@@ -524,6 +534,25 @@
             クラウドを確認
           </button>
         </div>
+        <section class="account-danger" aria-labelledby="account-danger-title">
+          <h3 id="account-danger-title">アカウント管理</h3>
+          <p>
+            アカウントとクラウド上のタスクを完全に削除します。
+            端末内のタスクは残ります。
+          </p>
+          <p
+            class="form-message"
+            id="sync-delete-message"
+            role="alert"
+          ></p>
+          <button
+            class="text-button danger-text"
+            id="sync-delete-account"
+            type="button"
+          >
+            アカウントとクラウドデータを削除
+          </button>
+        </section>
         <div class="dialog-actions">
           <button class="text-button danger-text" id="sync-logout" type="button">
             ログアウト

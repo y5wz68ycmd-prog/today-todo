@@ -1,14 +1,19 @@
-const CACHE_NAME = "today-todo-v3";
+const CACHE_NAME = "today-todo-v4";
 const APP_SHELL = [
   "./",
   "./index.html",
   "./style.css",
+  "./legal.css",
   "./app.js",
   "./sync-config.js",
   "./manifest.webmanifest",
   "./icon.svg",
   "./icon-192.png",
   "./icon-512.png",
+  "./privacy.html",
+  "./terms.html",
+  "./support.html",
+  "./account-deletion.html",
 ];
 
 self.addEventListener("install", (event) => {
