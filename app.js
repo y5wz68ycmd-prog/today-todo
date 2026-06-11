@@ -118,6 +118,7 @@ let autoSyncTimer = null;
 let syncInProgress = false;
 let pendingCloudRow = null;
 let suppressSyncTracking = true;
+let nativeReminderTimer = null;
 const syncConfig = {
   supabaseUrl: String(window.TODO_SYNC_CONFIG?.supabaseUrl ?? "")
     .replace(/\/+$/, ""),
@@ -366,6 +367,7 @@ function loadSettings() {
 function saveTodos() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
   markLocalChange();
+  scheduleNativeReminderRefresh();
 }
 
 function saveHistory() {
@@ -383,6 +385,97 @@ function getLocalDateString(date = new Date()) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function isNativeApp() {
+  return Boolean(window.Capacitor?.isNativePlatform?.());
+}
+
+function getNativeNotifications() {
+  return isNativeApp()
+    ? window.Capacitor?.Plugins?.LocalNotifications || null
+    : null;
+}
+
+function getNativeNotificationId(todoId) {
+  let hash = 2166136261;
+
+  for (const character of String(todoId)) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return ((hash >>> 0) % 2147483646) + 1;
+}
+
+function getReminderTimestamp(todo) {
+  return new Date(`${todo.dueDate}T${todo.reminderTime}:00`).getTime();
+}
+
+function scheduleNativeReminderRefresh() {
+  if (!getNativeNotifications()) {
+    return;
+  }
+
+  clearTimeout(nativeReminderTimer);
+  nativeReminderTimer = setTimeout(() => {
+    scheduleNativeReminders().catch(() => {
+      // The next app launch or task change will retry the schedule.
+    });
+  }, 250);
+}
+
+async function scheduleNativeReminders() {
+  const notifications = getNativeNotifications();
+
+  if (!notifications) {
+    return;
+  }
+
+  const permission = await notifications.checkPermissions();
+
+  if (permission.display !== "granted") {
+    return;
+  }
+
+  const pending = await notifications.getPending();
+  const ownedNotifications = pending.notifications.filter(
+    (notification) => notification.extra?.source === "todo-reminder",
+  );
+
+  if (ownedNotifications.length > 0) {
+    await notifications.cancel({
+      notifications: ownedNotifications.map(({ id }) => ({ id })),
+    });
+  }
+
+  const now = Date.now();
+  const reminders = todos
+    .filter(
+      (todo) =>
+        !todo.completed &&
+        todo.dueDate &&
+        todo.reminderTime &&
+        getReminderTimestamp(todo) > now,
+    )
+    .map((todo) => ({
+      title: todo.text,
+      body: `${formatDueDate(todo)} ${todo.reminderTime}`,
+      id: getNativeNotificationId(todo.id),
+      schedule: {
+        at: new Date(getReminderTimestamp(todo)),
+        allowWhileIdle: true,
+      },
+      autoCancel: true,
+      extra: {
+        source: "todo-reminder",
+        todoId: todo.id,
+      },
+    }));
+
+  if (reminders.length > 0) {
+    await notifications.schedule({ notifications: reminders });
+  }
 }
 
 function isOverdue(todo) {
@@ -1725,7 +1818,27 @@ function closeSyncDialog() {
   elements.syncDialog.close();
 }
 
-function updateNotificationButton() {
+async function updateNotificationButton() {
+  const nativeNotifications = getNativeNotifications();
+
+  if (nativeNotifications) {
+    elements.notificationButton.hidden = false;
+
+    try {
+      const permission = await nativeNotifications.checkPermissions();
+      const granted = permission.display === "granted";
+      elements.notificationButton.textContent = granted
+        ? "通知は有効"
+        : "通知を有効化";
+      elements.notificationButton.disabled = granted;
+    } catch {
+      elements.notificationButton.textContent = "通知を有効化";
+      elements.notificationButton.disabled = false;
+    }
+
+    return;
+  }
+
   if (!("Notification" in window)) {
     elements.notificationButton.hidden = true;
     return;
@@ -1741,6 +1854,30 @@ function updateNotificationButton() {
 }
 
 async function requestNotifications() {
+  const nativeNotifications = getNativeNotifications();
+
+  if (nativeNotifications) {
+    try {
+      const currentPermission = await nativeNotifications.checkPermissions();
+      const permission = currentPermission.display === "granted"
+        ? currentPermission
+        : await nativeNotifications.requestPermissions();
+
+      await updateNotificationButton();
+
+      if (permission.display === "granted") {
+        await scheduleNativeReminders();
+        showToast("期限通知を有効にしました。");
+      } else {
+        showToast("通知は許可されませんでした。");
+      }
+    } catch {
+      showToast("通知の設定を更新できませんでした。");
+    }
+
+    return;
+  }
+
   if (location.protocol === "file:") {
     showToast("通知は公開版のアプリから有効にできます。");
     return;
@@ -1784,6 +1921,10 @@ async function showReminderNotification(todo) {
 }
 
 async function checkReminders() {
+  if (getNativeNotifications()) {
+    return;
+  }
+
   if (
     !("Notification" in window) ||
     Notification.permission !== "granted"
@@ -2185,6 +2326,7 @@ render();
 updateSyncUI();
 updateNotificationButton();
 checkReminders();
+scheduleNativeReminderRefresh();
 suppressSyncTracking = false;
 setInterval(checkReminders, 30 * 1000);
 setInterval(() => {
@@ -2222,7 +2364,11 @@ handleAuthRedirect()
     showToast(error.message);
   });
 
-if ("serviceWorker" in navigator && location.protocol !== "file:") {
+if (
+  "serviceWorker" in navigator &&
+  location.protocol !== "file:" &&
+  !isNativeApp()
+) {
   navigator.serviceWorker.register("./service-worker.js").catch(() => {
     // The app remains fully usable online if registration is unavailable.
   });

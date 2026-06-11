@@ -776,6 +776,91 @@ async function evaluate(client, expression) {
       "アカウント削除時に端末内タスクを安全に保持できませんでした",
     );
 
+    const nativeNotifications = await evaluate(
+      client,
+      `(async () => {
+        const originalCapacitor = window.Capacitor;
+        const originalTodos = todos;
+        const scheduled = [];
+        const cancelled = [];
+        const future = new Date(Date.now() + 2 * 60 * 60 * 1000);
+        const reminderTime =
+          String(future.getHours()).padStart(2, "0") + ":" +
+          String(future.getMinutes()).padStart(2, "0");
+
+        window.Capacitor = {
+          isNativePlatform: () => true,
+          Plugins: {
+            LocalNotifications: {
+              checkPermissions: async () => ({ display: "granted" }),
+              requestPermissions: async () => ({ display: "granted" }),
+              getPending: async () => ({
+                notifications: [{
+                  id: 99,
+                  extra: { source: "todo-reminder" }
+                }]
+              }),
+              cancel: async ({ notifications }) => {
+                cancelled.push(...notifications.map(({ id }) => id));
+              },
+              schedule: async ({ notifications }) => {
+                scheduled.push(...notifications);
+                return { notifications };
+              }
+            }
+          }
+        };
+        todos = [{
+          id: "native-reminder-test",
+          text: "Android通知テスト",
+          completed: false,
+          dueDate: getLocalDateString(future),
+          reminderTime,
+          priority: "medium",
+          repeat: "none",
+          category: "",
+          subtasks: [],
+          createdAt: Date.now()
+        }];
+
+        await updateNotificationButton();
+        await scheduleNativeReminders();
+
+        const result = {
+          scheduledCount: scheduled.length,
+          cancelled,
+          id: scheduled[0]?.id,
+          source: scheduled[0]?.extra?.source,
+          isFuture:
+            new Date(scheduled[0]?.schedule?.at || 0).getTime() > Date.now(),
+          buttonDisabled:
+            document.querySelector("#notification-button").disabled,
+          buttonText:
+            document.querySelector("#notification-button").textContent
+        };
+
+        todos = originalTodos;
+        window.Capacitor = originalCapacitor;
+        await updateNotificationButton();
+        return result;
+      })()`,
+    );
+    assert(
+      nativeNotifications.scheduledCount === 1 &&
+        Number.isInteger(nativeNotifications.id) &&
+        nativeNotifications.id > 0 &&
+        nativeNotifications.id <= 2147483647 &&
+        nativeNotifications.source === "todo-reminder" &&
+        nativeNotifications.isFuture,
+      `Android通知を正しく予約できませんでした: ${JSON.stringify(nativeNotifications)}`,
+    );
+    assert(
+      nativeNotifications.cancelled.includes(99) &&
+        nativeNotifications.buttonDisabled &&
+        nativeNotifications.buttonText.includes("有効"),
+      "Android通知の更新または許可状態の表示が正しくありません",
+    );
+
     const publicPages = [
       ["privacy.html", "プライバシーポリシー"],
       ["terms.html", "利用規約"],
@@ -835,7 +920,7 @@ async function evaluate(client, expression) {
     );
 
     console.log(
-      "PASS: validation, tasks, repeat, subtasks, history, theme, persistence, accessibility, mobile, PWA, cloud sync, session refresh, password reset, account deletion, privacy pages, backup",
+      "PASS: validation, tasks, repeat, subtasks, history, theme, persistence, accessibility, mobile, PWA, cloud sync, session refresh, password reset, account deletion, native notifications, privacy pages, backup",
     );
     await client.send("Browser.close");
   } finally {

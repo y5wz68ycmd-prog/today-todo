@@ -1,2 +1,5 @@
 tests/.edge-test-profile/
+supabase/.temp/
+node_modules/
+www/
 *.log

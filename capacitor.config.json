@@ -1,0 +1,13 @@
+{
+  "appId": "io.github.y5wz68ycmdprog.todaytodo",
+  "appName": "今日のToDo",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "iconColor": "#356859"
+    }
+  }
+}

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">今日のToDo</string>
+    <string name="title_activity_main">今日のToDo</string>
+    <string name="package_name">io.github.y5wz68ycmdprog.todaytodo</string>
+    <string name="custom_url_scheme">io.github.y5wz68ycmdprog.todaytodo</string>
+</resources>
